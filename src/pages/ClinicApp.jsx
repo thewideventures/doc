@@ -20,6 +20,17 @@ import AccountStatusBanner from '../components/AccountStatusBanner';
 import PayoutRequestPanel from '../components/PayoutRequestPanel';
 import { ModeBadge } from '../components/BookingModal';
 import { AnalyticsView } from './DoctorApp';
+import QueuePanel from '../portal/QueuePanel';
+import EarningsPanel from '../portal/EarningsPanel';
+import { useT } from '../i18n';
+import { ListOrdered, IndianRupee } from 'lucide-react';
+
+function ClinicQueue({ client }) {
+  const [targets, setTargets] = useState(null);
+  useEffect(() => { client.get('/clinic-portal/queue/locations').then(r => setTargets(r.locations.map(l => ({ key: `${l.doctorId}|${l.locationId}`, label: `${l.doctorName} — ${l.locationName}`, doctorId: l.doctorId, locationId: l.locationId })))).catch(() => setTargets([])); }, [client]);
+  if (!targets) return null;
+  return <QueuePanel client={client} base="/clinic-portal" targets={targets} />;
+}
 
 const FACILITIES = ['Pharmacy', 'Laboratory', 'X-Ray', 'Ultrasound', 'ECG', 'Parking', 'Wheelchair access', 'Ambulance', 'Emergency 24x7', 'ICU', 'Cafeteria', 'Insurance / cashless', 'Wi-Fi'];
 
@@ -399,6 +410,7 @@ function ClinicProfile({ client, clinic, onChanged }) {
 // App
 // ---------------------------------------------------------------------------
 function ClinicWorkspace() {
+  const tr = useT();
   const [params, setParams] = useSearchParams();
   const [session, setSessionState] = useState(() => getSession('clinic'));
   const [notice, setNotice] = useState('');
@@ -435,9 +447,11 @@ function ClinicWorkspace() {
   const nav = [
     { id: 'overview', label: 'Overview', icon: LayoutDashboard, mobile: true },
     { id: 'bookings', label: 'Bookings', icon: CalendarCheck, mobile: true },
-    { id: 'doctors', label: 'Doctors', icon: Users, badge: stats.requests, mobile: true },
+    { id: 'queue', label: tr('pq.title'), icon: ListOrdered, mobile: true },
+    { id: 'doctors', label: 'Doctors', icon: Users, badge: stats.requests },
     { id: 'profile', label: 'Clinic profile', icon: Building2 },
     { id: 'analytics', label: 'Analytics', icon: BarChart3 },
+    { id: 'earnings', label: tr('earn.title'), icon: IndianRupee },
     { id: 'payouts', label: 'Payouts', icon: Wallet },
     { id: 'subscription', label: 'Plan & billing', icon: Crown }
   ];
@@ -451,6 +465,8 @@ function ClinicWorkspace() {
         <WalkInModal open={walkIn} client={client} onClose={() => setWalkIn(false)} onDone={() => { setRefresh(n => n + 1); load(); }} />
       </>); break;
     case 'doctors': page = <Doctors client={client} clinic={clinic} onChanged={load} />; break;
+    case 'queue': page = <ClinicQueue client={client} />; break;
+    case 'earnings': page = <EarningsPanel client={client} base="/clinic-portal" />; break;
     case 'profile': page = <ClinicProfile client={client} clinic={clinic} onChanged={setClinic} />; break;
     case 'analytics': page = clinic.plan?.limits?.analytics ? <AnalyticsView data={analytics} error={aErr} /> : <><PageHeader title="Analytics" /><Card><p><Lock size={15} /> Analytics is part of the Pro and Premium clinic plans.</p><button className="btn-primary adm-btn fx-mt" onClick={() => go('subscription')}><Crown size={14} /> See plans</button></Card></>; break;
     case 'payouts': page = <><PageHeader title="Payouts" subtitle="Online collections for bookings at your clinic are settled to the clinic." /><PayoutRequestPanel client={client} entity={clinic} accent="#7c3aed" onChange={load} /></>; break;

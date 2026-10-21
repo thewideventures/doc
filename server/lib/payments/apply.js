@@ -7,6 +7,7 @@ import { getProviderByName, paymentsNotConfigured } from './index.js';
 import { toPaise } from './razorpay.js';
 import { confirmBookingPayment } from '../bookings.js';
 import { activateSubscription } from '../subscriptions.js';
+import { confirmLabOrderPayment } from '../labs.js';
 import { applyRefundWebhook } from '../refunds.js';
 import log from '../logger.js';
 
@@ -73,6 +74,10 @@ export async function applyCapturedPayment(order, p, source) {
     if (claimed.purpose === 'booking') {
       const booking = await confirmBookingPayment(claimed, { paymentId: p.id });
       return { order: claimed, booking };
+    }
+    if (claimed.purpose === 'lab_order') {
+      const labOrder = await confirmLabOrderPayment(claimed, { paymentId: p.id });
+      return { order: claimed, labOrder };
     }
     const sub = await activateSubscription(claimed, { paymentId: p.id });
     return { order: claimed, subscription: sub };

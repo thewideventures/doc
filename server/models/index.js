@@ -5,7 +5,7 @@ mongoose.set('strictQuery', 'throw');
 mongoose.set('sanitizeFilter', false); // request input is sanitised by lib/security.js before it reaches queries
 
 // Never serialise secrets: any field whose name marks it as a hash / secret / token is removed from toJSON output.
-const SENSITIVE_FIELD = /^(passwordHash|tokenHash|codeHash|otpHash|otp|secret|totpSecret|refreshToken|__v)$/;
+const SENSITIVE_FIELD = /^(passwordHash|tokenHash|codeHash|otpHash|otp|secret|totpSecret|refreshToken|partnerKeyHash|__v)$/;
 function stripSensitive(obj) {
   if (!obj || typeof obj !== 'object') return obj;
   for (const k of Object.keys(obj)) {
@@ -179,6 +179,8 @@ const ClinicSchema = new mongoose.Schema({
     default: () => ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(d => ({ day: d, open: '09:00', close: '20:00', closed: d === 'Sun' }))
   },
   is24x7: { type: Boolean, default: false },
+  emergencyServices: { type: Boolean, default: false }, // casualty / ER (listed in the emergency "nearest hospitals")
+  insurers: [{ type: String }],                         // insurance / cashless partners accepted
   subscription: { type: SubscriptionStateSchema, default: () => ({}) },
   facilities: [{ type: String }],
   doctorIds: [{ type: String }],
@@ -240,6 +242,9 @@ const DoctorSchema = new mongoose.Schema({
   registrationNumber: { type: String, default: '' }, // medical council registration no.
   councilName: { type: String, default: '' },        // e.g. Travancore-Cochin Medical Council / NMC
   registrationYear: { type: Number, default: null },
+  registrationVerified: { type: Boolean, default: false },   // admin checked the council registration (badge)
+  registrationVerifiedAt: { type: Date, default: null },
+  insurers: [{ type: String }],                              // insurance / cashless partners accepted
   languages: [{ type: String }],
   addressDetails: { type: AddressSchema, default: () => ({}) },
   location: { type: PointSchema, default: undefined },
@@ -272,9 +277,34 @@ const UserSchema = new mongoose.Schema({
   addressDetails: { type: AddressSchema, default: () => ({}) },
   location: { type: PointSchema, default: undefined },
   familyMembers: {
-    type: [{ id: String, name: String, relation: String, dob: String, gender: String, _id: false }],
+    type: [{ id: String, name: String, relation: String, dob: String, gender: String, photo: String, _id: false }],
     default: () => []
   },
+  preferredLanguage: { type: String, enum: ['en', 'ml', 'hi'], default: 'en' },
+  // Channels the patient opted into for reminders (in-app notifications are always on)
+  notificationPrefs: {
+    whatsapp: { type: Boolean, default: false },
+    sms: { type: Boolean, default: false },
+    medicineReminders: { type: Boolean, default: false }
+  },
+  // ABHA (Ayushman Bharat Health Account) — optional, never required
+  abha: {
+    number: { type: String, default: '' },   // 14 digits, stored formatted xx-xxxx-xxxx-xxxx
+    address: { type: String, default: '' },  // e.g. name@abdm
+    status: { type: String, enum: ['unlinked', 'linked'], default: 'unlinked' },
+    linkedAt: { type: Date, default: null },
+    provider: { type: String, default: '' }
+  },
+  privacyNoticeVersion: { type: String, default: '' },
+  privacyAcceptedAt: { type: Date, default: null },
+  deletion: {
+    requestedAt: { type: Date, default: null },
+    scheduledFor: { type: Date, default: null },
+    reason: { type: String, default: '' },
+    cancelledAt: { type: Date, default: null },
+    completedAt: { type: Date, default: null }
+  },
+  anonymisedAt: { type: Date, default: null },
   lastLoginAt: { type: Date, default: null },
   registeredAt: { type: String, default: () => new Date().toISOString().split('T')[0] }
 }, { timestamps: true });
@@ -336,7 +366,20 @@ const BookingSchema = new mongoose.Schema({
   confirmedAt: { type: Date, default: null },
   completedAt: { type: Date, default: null },
   isPaid: { type: Boolean, default: true },
-  claimStatus: { type: String, enum: ['Pending', 'Claimed'], default: 'Pending' }
+  claimStatus: { type: String, enum: ['Pending', 'Claimed'], default: 'Pending' },
+  // Live queue (per doctor + location + day)
+  queueToken: { type: Number, default: null },
+  queueStatus: { type: String, enum: ['waiting', 'in_consult', 'done', 'skipped'], default: 'waiting' },
+  queuePriority: { type: Date, default: null },   // recalled after a skip => goes to the front
+  consultStartedAt: { type: Date, default: null },
+  consultEndedAt: { type: Date, default: null },
+  // Follow-ups, reschedules, one-tap links
+  followUpOf: { type: String, default: '' },
+  rescheduledFrom: { type: String, default: '' }, // previous "date time"
+  rescheduleCount: { type: Number, default: 0 },
+  linkVersion: { type: Number, default: 0 },      // bump to invalidate earlier signed manage links
+  waitlistEntryId: { type: String, default: '' },
+  anonymised: { type: Boolean, default: false }
 }, { timestamps: true });
 BookingSchema.index({ slotLock: 1 }, { unique: true, sparse: true });
 BookingSchema.index({ doctorId: 1, date: 1, status: 1 });
@@ -351,6 +394,9 @@ const ReviewSchema = new mongoose.Schema({
   userName: { type: String, required: true },
   userPhone: { type: String, default: '' },
   isVerifiedBooking: { type: Boolean, default: false },
+  bookingId: { type: String, default: '' },        // one review per completed booking
+  verifiedVisit: { type: Boolean, default: false }, // written by the patient of a completed booking
+  userId: { type: String, default: '' },
   rating: { type: Number, required: true, min: 1, max: 5 },
   comment: { type: String, required: true },
   isFlagged: { type: Boolean, default: false }, // If contains bad words, flagged and hidden from public
@@ -426,8 +472,8 @@ const LedgerTransactionSchema = new mongoose.Schema({
   invoiceNumber: { type: String, required: true, unique: true }, // Sequential per financial year, e.g. FAD/26-27/000001
   invoiceSeq: { type: Number, required: true },
   financialYear: { type: String, required: true }, // e.g. 2026-27
-  type: { type: String, enum: ['subscription', 'patient_fee', 'refund'], required: true },
-  category: { type: String, enum: ['doctor_subscription', 'clinic_subscription', 'booking_fee', 'booking_refund', 'subscription_refund'], required: true },
+  type: { type: String, enum: ['subscription', 'patient_fee', 'refund', 'lab_order', 'lab_commission'], required: true },
+  category: { type: String, enum: ['doctor_subscription', 'clinic_subscription', 'booking_fee', 'booking_refund', 'subscription_refund', 'lab_test', 'lab_refund', 'lab_commission'], required: true },
   documentType: { type: String, enum: ['invoice', 'credit_note', 'refund_voucher'], default: 'invoice' },
   originalInvoiceNumber: { type: String, default: '' }, // for credit notes / refunds
   bookingMode: { type: String, default: '' },
@@ -440,10 +486,11 @@ const LedgerTransactionSchema = new mongoose.Schema({
   razorpayOrderId: { type: String, default: '' },
   razorpayPaymentId: { type: String, default: '' },
   razorpayRefundId: { type: String, default: '' },
-  partyType: { type: String, enum: ['doctor', 'clinic', 'patient'], required: true },
+  partyType: { type: String, enum: ['doctor', 'clinic', 'patient', 'lab'], required: true },
   partyId: { type: String, default: '' },
   partyName: { type: String, default: '' },
   partyPhone: { type: String, default: '' },
+  labOrderId: { type: String, default: '' },
   partyGstin: { type: String, default: '' },
   partyState: { type: String, default: '' },
   partyStateCode: { type: String, default: '' },
@@ -501,6 +548,10 @@ const SettingsSchema = new mongoose.Schema({
   freeBookingPlatformFee: { type: Number, default: 0 }, // charged online for FREE-mode bookings (0 = nothing collected)
   cancellationWindowHours: { type: Number, default: 4 }, // patient cancels earlier than this => consultation/token refunded
   paymentHoldMinutes: { type: Number, default: 10 },
+  waitlistOfferMinutes: { type: Number, default: 15 },
+  labHomeCollectionFee: { type: Number, default: 99 },      // platform service (taxable)
+  labCommissionPercent: { type: Number, default: 15 },      // default commission charged to labs
+  deletionGraceDays: { type: Number, default: 30 },
   extraBadWords: [{ type: String }],
   disabledBadWords: [{ type: String }]
 }, { timestamps: true });
@@ -539,8 +590,8 @@ SubscriptionPlanSchema.index({ audience: 1, code: 1 }, { unique: true });
 // Online payment order (booking or subscription) — provider agnostic (mock / razorpay)
 const PaymentOrderSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true },
-  purpose: { type: String, enum: ['booking', 'subscription'], required: true },
-  refId: { type: String, required: true }, // bookingId or planId
+  purpose: { type: String, enum: ['booking', 'subscription', 'lab_order'], required: true },
+  refId: { type: String, required: true }, // bookingId, planId or labOrderId
   partyType: { type: String, enum: ['patient', 'doctor', 'clinic'], required: true },
   partyId: { type: String, default: '' },
   amount: { type: Number, required: true }, // INR
@@ -659,12 +710,254 @@ const NotificationSchema = new mongoose.Schema({
 NotificationSchema.index({ recipientType: 1, recipientId: 1, createdAt: -1 });
 NotificationSchema.index({ createdAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 180 }); // auto-prune after 180 days
 
+
+// ---------------------------------------------------------------- Phase 4
+// Live queue state per doctor + location + day
+const QueueDaySchema = new mongoose.Schema({
+  key: { type: String, required: true, unique: true }, // doctorId|locationId|date
+  doctorId: { type: String, required: true },
+  locationId: { type: String, required: true },
+  clinicId: { type: String, default: '' },
+  date: { type: String, required: true },
+  status: { type: String, enum: ['not_started', 'running', 'paused', 'closed'], default: 'not_started' },
+  currentBookingId: { type: String, default: '' },
+  nextToken: { type: Number, default: 1 },
+  delayMinutes: { type: Number, default: 0 },
+  pauseReason: { type: String, default: '' },
+  avgConsultMinutes: { type: Number, default: 0 }, // 0 = use the slot length
+  servedCount: { type: Number, default: 0 },
+  totalConsultMs: { type: Number, default: 0 },
+  startedAt: { type: Date, default: null }
+}, { timestamps: true });
+QueueDaySchema.index({ doctorId: 1, date: 1 });
+
+// Outbound messages (WhatsApp / SMS / in-app) produced by the scheduler
+const ScheduledMessageSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  dedupeKey: { type: String, required: true, unique: true },
+  kind: { type: String, required: true }, // booking_confirmation | reminder_24h | reminder_2h | queue_soon | waitlist_offer | medicine | lab_status
+  userId: { type: String, default: '' },
+  phone: { type: String, default: '' },
+  bookingId: { type: String, default: '' },
+  refId: { type: String, default: '' },
+  lang: { type: String, default: 'en' },
+  params: { type: mongoose.Schema.Types.Mixed, default: {} },
+  sendAt: { type: Date, required: true },
+  status: { type: String, enum: ['pending', 'sending', 'sent', 'failed', 'cancelled', 'skipped'], default: 'pending' },
+  channels: [{ channel: String, status: String, providerId: String, error: String, at: Date, _id: false }],
+  attempts: { type: Number, default: 0 },
+  lastError: { type: String, default: '' },
+  sentAt: { type: Date, default: null }
+}, { timestamps: true });
+ScheduledMessageSchema.index({ status: 1, sendAt: 1 });
+ScheduledMessageSchema.index({ bookingId: 1, status: 1 });
+ScheduledMessageSchema.index({ refId: 1, status: 1 });
+ScheduledMessageSchema.index({ createdAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 180 });
+
+// Waitlist for a doctor location + day (optionally a specific time). Freed slots are offered first-come.
+const WaitlistEntrySchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  userId: { type: String, required: true },
+  phone: { type: String, default: '' },
+  patientName: { type: String, default: '' },
+  memberId: { type: String, default: '' },
+  doctorId: { type: String, required: true },
+  doctorName: { type: String, default: '' },
+  locationId: { type: String, required: true },
+  locationName: { type: String, default: '' },
+  date: { type: String, required: true },
+  time: { type: String, default: '' }, // '' = any time that day
+  status: { type: String, enum: ['waiting', 'offered', 'claimed', 'expired', 'cancelled'], default: 'waiting' },
+  offeredTime: { type: String, default: '' },
+  offerExpiresAt: { type: Date, default: null },
+  offerLock: { type: String, default: undefined }, // doctorId|date|time while an offer is open (unique)
+  offersMade: { type: Number, default: 0 },
+  bookingId: { type: String, default: '' }
+}, { timestamps: true });
+WaitlistEntrySchema.index({ doctorId: 1, locationId: 1, date: 1, status: 1, createdAt: 1 });
+WaitlistEntrySchema.index({ userId: 1, status: 1 });
+WaitlistEntrySchema.index({ offerLock: 1 }, { unique: true, partialFilterExpression: { offerLock: { $type: 'string' } } });
+
+// Digital prescription + visit notes for a booking
+const MedicineSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  dosage: { type: String, default: '' },     // e.g. 500 mg, 1 tab
+  frequency: { type: String, default: '' },  // e.g. 1-0-1, OD, BD, TDS, SOS
+  timing: { type: String, default: '' },     // before food / after food / bedtime
+  durationDays: { type: Number, default: 0 },
+  instructions: { type: String, default: '' }
+}, { _id: false });
+const PrescriptionSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  bookingId: { type: String, required: true, unique: true },
+  doctorId: { type: String, required: true },
+  doctor: { name: String, qualifications: String, registrationNumber: String, councilName: String, specialities: [String], locationName: String, locationAddress: String, _id: false },
+  patientUserId: { type: String, default: '' },
+  memberId: { type: String, default: '' },
+  patientName: { type: String, default: '' },
+  patientAge: { type: String, default: '' },
+  patientGender: { type: String, default: '' },
+  visitDate: { type: String, default: '' },
+  complaints: { type: String, default: '' },
+  diagnosis: { type: String, default: '' },
+  visitNotes: { type: String, default: '' },     // shared with the patient
+  privateNotes: { type: String, default: '' },   // doctor only
+  vitals: { bp: String, pulse: String, temperature: String, weight: String, spo2: String, _id: false },
+  medicines: { type: [MedicineSchema], default: () => [] },
+  advice: { type: String, default: '' },
+  tests: [{ type: String }],
+  followUp: { afterDays: { type: Number, default: 0 }, date: { type: String, default: '' }, note: { type: String, default: '' } },
+  reminders: { enabled: { type: Boolean, default: false }, whatsapp: { type: Boolean, default: false }, sms: { type: Boolean, default: false }, scheduledCount: { type: Number, default: 0 } },
+  version: { type: Number, default: 1 },
+  retainedForLegal: { type: Boolean, default: false } // patient deleted their account; kept de-identified for the doctor's statutory record
+}, { timestamps: true });
+PrescriptionSchema.index({ patientUserId: 1, createdAt: -1 });
+PrescriptionSchema.index({ doctorId: 1, createdAt: -1 });
+
+// Health record timeline entry (prescriptions, lab reports, other documents)
+const HealthRecordSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  userId: { type: String, required: true },
+  memberId: { type: String, default: '' }, // '' = the account holder
+  type: { type: String, enum: ['prescription', 'lab_report', 'document'], required: true },
+  title: { type: String, default: '' },
+  date: { type: String, default: '' },
+  source: { type: String, enum: ['doctor', 'patient', 'lab'], default: 'patient' },
+  prescriptionId: { type: String, default: '' },
+  bookingId: { type: String, default: '' },
+  doctorId: { type: String, default: '' },
+  doctorName: { type: String, default: '' },
+  labOrderId: { type: String, default: '' },
+  labName: { type: String, default: '' },
+  file: { key: String, mime: String, size: Number, originalName: String, _id: false },
+  notes: { type: String, default: '' }
+}, { timestamps: true });
+HealthRecordSchema.index({ userId: 1, memberId: 1, date: -1 });
+
+// Consent-based sharing of records with the doctor of a booking
+const RecordShareSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  userId: { type: String, required: true },
+  memberId: { type: String, default: '' },
+  bookingId: { type: String, required: true },
+  doctorId: { type: String, required: true },
+  recordIds: [{ type: String }],
+  allRecords: { type: Boolean, default: false },
+  expiresAt: { type: Date, required: true },
+  revokedAt: { type: Date, default: null }
+}, { timestamps: true });
+RecordShareSchema.index({ bookingId: 1, doctorId: 1, revokedAt: 1 });
+RecordShareSchema.index({ userId: 1 });
+
+// Labs / diagnostic partners and their test catalogue
+const LabSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  name: { type: String, required: true },
+  type: { type: String, enum: ['lab', 'partner'], default: 'lab' },
+  address: { type: String, default: '' },
+  city: { type: String, default: '' },
+  pincodes: [{ type: String }],          // home-collection service area ([] = anywhere)
+  phone: { type: String, default: '' },
+  email: { type: String, default: '' },
+  gstin: { type: String, default: '' },
+  stateCode: { type: String, default: '' },
+  accreditation: { type: String, default: '' }, // e.g. NABL
+  homeCollection: { type: Boolean, default: true },
+  collectionWindows: { type: [String], default: () => ['07:00-09:00', '09:00-11:00', '11:00-13:00', '16:00-18:00'] },
+  commissionPercent: { type: Number, default: null }, // null = platform default
+  partnerKeyHash: { type: String, default: '' },      // sha256 of the lab partner API key
+  partnerKeyHint: { type: String, default: '' },
+  isActive: { type: Boolean, default: true }
+}, { timestamps: true });
+const LabTestSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  labId: { type: String, required: true },
+  code: { type: String, default: '' },
+  name: { type: String, required: true },
+  category: { type: String, default: 'General' },
+  description: { type: String, default: '' },
+  price: { type: Number, required: true },
+  mrp: { type: Number, default: 0 },
+  preparation: { type: String, default: '' },  // e.g. 10-12 h fasting
+  sampleType: { type: String, default: 'Blood' },
+  tatHours: { type: Number, default: 24 },
+  homeCollection: { type: Boolean, default: true },
+  isActive: { type: Boolean, default: true }
+}, { timestamps: true });
+LabTestSchema.index({ labId: 1, isActive: 1 });
+LabTestSchema.index({ name: 1 });
+const LAB_ORDER_STATUSES = ['AwaitingPayment', 'Confirmed', 'SampleCollected', 'Processing', 'ReportReady', 'Cancelled', 'Expired'];
+const LabOrderSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  orderCode: { type: String, required: true },
+  userId: { type: String, required: true },
+  memberId: { type: String, default: '' },
+  patientName: { type: String, default: '' },
+  patientPhone: { type: String, default: '' },
+  labId: { type: String, required: true },
+  labName: { type: String, default: '' },
+  tests: [{ testId: String, name: String, price: Number, preparation: String, tatHours: Number, _id: false }],
+  mode: { type: String, enum: ['lab_visit', 'home_collection'], required: true },
+  address: { type: AddressSchema, default: () => ({}) },
+  slotDate: { type: String, required: true },
+  slotWindow: { type: String, default: '' },
+  subtotal: { type: Number, required: true },
+  collectionFee: { type: Number, default: 0 },
+  total: { type: Number, required: true },
+  commissionPercent: { type: Number, default: 0 },
+  commission: { type: Number, default: 0 },
+  commissionGst: { type: Number, default: 0 },
+  labPayable: { type: Number, default: 0 },
+  status: { type: String, enum: LAB_ORDER_STATUSES, default: 'AwaitingPayment' },
+  statusHistory: [{ status: String, at: Date, by: String, note: String, _id: false }],
+  paymentOrderId: { type: String, default: '' },
+  invoiceNumber: { type: String, default: '' },
+  commissionInvoiceNumber: { type: String, default: '' },
+  refundAmount: { type: Number, default: 0 },
+  reportRecordIds: [{ type: String }],
+  cancelReason: { type: String, default: '' },
+  anonymised: { type: Boolean, default: false }
+}, { timestamps: true });
+LabOrderSchema.index({ userId: 1, createdAt: -1 });
+LabOrderSchema.index({ labId: 1, status: 1, slotDate: 1 });
+LabOrderSchema.index({ status: 1, createdAt: -1 });
+
+// DPDP Act consent records (append-only; the latest record per purpose is the current state)
+export const CONSENT_PURPOSES = ['privacy_notice', 'health_data', 'marketing', 'whatsapp_reminders', 'sms_reminders', 'abha_linking', 'record_sharing'];
+const ConsentSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  userId: { type: String, required: true },
+  purpose: { type: String, enum: CONSENT_PURPOSES, required: true },
+  granted: { type: Boolean, required: true },
+  version: { type: String, default: '' },
+  method: { type: String, default: 'settings' }, // onboarding | settings | booking | share | abha | system
+  refId: { type: String, default: '' },
+  ip: { type: String, default: '' },          // truncated (/24) — enough for evidence, minimal PII
+  userAgent: { type: String, default: '' },
+  at: { type: Date, default: Date.now }
+}, { timestamps: false });
+ConsentSchema.index({ userId: 1, purpose: 1, at: -1 });
+
+// ABHA linking transactions (short-lived)
+const AbhaTxnSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  userId: { type: String, required: true },
+  provider: { type: String, default: '' },
+  providerTxnId: { type: String, default: '' },
+  abhaNumber: { type: String, default: '' },
+  abhaAddress: { type: String, default: '' },
+  attempts: { type: Number, default: 0 },
+  expiresAt: { type: Date, required: true }
+}, { timestamps: true });
+AbhaTxnSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
 attachStatusSync(ClinicSchema, 'pending');
 attachStatusSync(DoctorSchema, 'pending');
 attachStatusSync(UserSchema, 'active');
 UserSchema.index({ role: 1, status: 1, createdAt: -1 });
 ReviewSchema.index({ moderationStatus: 1, createdAt: -1 });
 ReviewSchema.index({ doctorId: 1, moderationStatus: 1 });
+ReviewSchema.index({ bookingId: 1 }, { unique: true, partialFilterExpression: { bookingId: { $type: 'string', $gt: '' } }, name: 'uniq_review_booking' });
 ReviewSchema.pre('save', function () {
   if (!this.moderationStatus) this.moderationStatus = this.isFlagged ? 'flagged' : 'visible';
 });
@@ -698,3 +991,15 @@ export const OtpChallenge = mongoose.model('OtpChallenge', OtpChallengeSchema);
 export const AdminLoginState = mongoose.model('AdminLoginState', AdminLoginStateSchema);
 export const AdminAuditLog = mongoose.model('AdminAuditLog', AdminAuditLogSchema);
 export const WebhookEvent = mongoose.model('WebhookEvent', WebhookEventSchema);
+export const QueueDay = mongoose.model('QueueDay', QueueDaySchema);
+export const ScheduledMessage = mongoose.model('ScheduledMessage', ScheduledMessageSchema);
+export const WaitlistEntry = mongoose.model('WaitlistEntry', WaitlistEntrySchema);
+export const Prescription = mongoose.model('Prescription', PrescriptionSchema);
+export const HealthRecord = mongoose.model('HealthRecord', HealthRecordSchema);
+export const RecordShare = mongoose.model('RecordShare', RecordShareSchema);
+export const Lab = mongoose.model('Lab', LabSchema);
+export const LabTest = mongoose.model('LabTest', LabTestSchema);
+export const LabOrder = mongoose.model('LabOrder', LabOrderSchema);
+export const Consent = mongoose.model('Consent', ConsentSchema);
+export const AbhaTxn = mongoose.model('AbhaTxn', AbhaTxnSchema);
+export { LAB_ORDER_STATUSES };

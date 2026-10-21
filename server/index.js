@@ -9,6 +9,7 @@ const { createApp } = await import('./app.js');
 const { releaseExpiredHolds } = await import('./lib/bookings.js');
 const { sweepExpiredSubscriptions } = await import('./lib/subscriptions.js');
 const { retryPendingWebhooks } = await import('./lib/payments/apply.js');
+const { startScheduler } = await import('./lib/scheduler.js');
 
 const app = createApp();
 
@@ -34,3 +35,4 @@ app.listen(config.port, () => {
   if (config.otp.demo) log.warn('*** DEMO OTP IS ENABLED — anyone can sign in to any phone number with 123456. Never use this in production. ***');
 });
 startSweeps();
+startScheduler();

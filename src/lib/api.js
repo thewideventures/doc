@@ -158,6 +158,13 @@ export function createClient(role, { prefix = '', onExpired, onBlocked } = {}) {
       f.append('file', file, filename || file.name || 'upload');
       return apiFetch('/api/uploads', { method: 'POST', form: f, token });
     }),
+    /** Multipart upload to a specific endpoint (e.g. /me/records/upload). */
+    uploadTo: (path, file, fields = {}, filename) => withAuth(token => {
+      const f = new FormData();
+      Object.entries(fields).forEach(([k, v]) => v !== undefined && v !== null && v !== '' && f.append(k, v));
+      f.append('file', file, filename || file.name || 'upload');
+      return apiFetch(`${prefix}${path}`, { method: 'POST', form: f, token });
+    }),
     /** Authenticated binary download (private documents) -> Blob */
     blob: path => withAuth(async token => {
       const res = await fetch(path.startsWith('/api') ? path : `/api${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {}, credentials: 'same-origin' });

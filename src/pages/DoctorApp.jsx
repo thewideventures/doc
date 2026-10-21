@@ -17,6 +17,33 @@ import DocumentUpload from '../components/DocumentUpload';
 import AccountStatusBanner from '../components/AccountStatusBanner';
 import PayoutRequestPanel from '../components/PayoutRequestPanel';
 import { ModeBadge, KIND_ICON } from '../components/BookingModal';
+import QueuePanel from '../portal/QueuePanel';
+import EarningsPanel from '../portal/EarningsPanel';
+import PrescriptionEditor from '../portal/PrescriptionEditor';
+import SharedRecordsModal from '../portal/SharedRecordsModal';
+import { useT } from '../i18n';
+import { Pill, FolderOpen, ListOrdered, IndianRupee } from 'lucide-react';
+
+/** Bookings + clinical actions (prescription editor, shared records) for the doctor portal. */
+function DoctorBookings({ client, doctor, onChanged }) {
+  const t = useT();
+  const [rx, setRx] = useState(null);
+  const [rec, setRec] = useState(null);
+  const today = new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
+  return (
+    <>
+      <BookingsPanel client={client} base="/doctor-portal" locations={doctor.consultationLocations} onChanged={onChanged}
+        extraActions={b => (
+          <>
+            {['Confirmed', 'Completed'].includes(b.status) && b.date <= today && <button className="adm-act adm-act-blue" onClick={() => setRx(b)} data-testid="open-rx"><Pill size={13} /> {t('dr.prescription')}</button>}
+            {['Pending', 'Confirmed', 'Completed'].includes(b.status) && <button className="adm-act" onClick={() => setRec(b)} data-testid="open-records"><FolderOpen size={13} /> {t('dr.records')}</button>}
+          </>
+        )} />
+      {rx && <PrescriptionEditor client={client} booking={rx} onClose={() => setRx(null)} />}
+      {rec && <SharedRecordsModal client={client} booking={rec} onClose={() => setRec(null)} />}
+    </>
+  );
+}
 
 function useSpecialities() {
   const [list, setList] = useState([]);
@@ -308,6 +335,7 @@ export function AnalyticsView({ data, error }) {
 // App
 // ---------------------------------------------------------------------------
 function DoctorWorkspace() {
+  const tr = useT();
   const [params, setParams] = useSearchParams();
   const [session, setSessionState] = useState(() => getSession('doctor'));
   const [notice, setNotice] = useState('');
@@ -335,16 +363,20 @@ function DoctorWorkspace() {
   const nav = [
     { id: 'overview', label: 'Overview', icon: LayoutDashboard, mobile: true },
     { id: 'bookings', label: 'Bookings', icon: CalendarCheck, badge: data.stats.pending, mobile: true },
-    { id: 'locations', label: 'Locations', icon: MapPin, mobile: true },
+    { id: 'queue', label: tr('pq.title'), icon: ListOrdered, mobile: true },
+    { id: 'locations', label: 'Locations', icon: MapPin },
     { id: 'profile', label: 'Profile', icon: UserRound },
     { id: 'clinics', label: 'Clinics', icon: Building2, badge: data.stats.invites },
     { id: 'analytics', label: 'Analytics', icon: BarChart3 },
+    { id: 'earnings', label: tr('earn.title'), icon: IndianRupee },
     { id: 'payouts', label: 'Payouts', icon: Wallet },
     { id: 'subscription', label: 'Plan & billing', icon: Crown }
   ];
   let page;
   switch (tab) {
-    case 'bookings': page = <><PageHeader title="Bookings" subtitle="Accept requests, complete visits and keep patients informed." /><BookingsPanel client={client} base="/doctor-portal" locations={doctor.consultationLocations} onChanged={load} /></>; break;
+    case 'bookings': page = <><PageHeader title="Bookings" subtitle="Accept requests, complete visits and keep patients informed." /><DoctorBookings client={client} doctor={doctor} onChanged={load} /></>; break;
+    case 'queue': page = <QueuePanel client={client} base="/doctor-portal" targets={(doctor.consultationLocations || []).filter(l => l.isActive !== false && l.kind !== 'online').map(l => ({ key: l.id, label: l.name, locationId: l.id }))} />; break;
+    case 'earnings': page = <EarningsPanel client={client} base="/doctor-portal" />; break;
     case 'locations': page = <Locations client={client} doctor={doctor} onChanged={setDoctor} />; break;
     case 'profile': page = <Profile client={client} doctor={doctor} onChanged={setDoctor} />; break;
     case 'clinics': page = <Clinics client={client} onChanged={d => { setDoctor(d); load(); }} />; break;

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Stethoscope, Building2, Users, ClipboardCheck, MessageSquareWarning, BookOpenText,
-  Receipt, Settings as SettingsIcon, LogOut, Menu, X, ShieldCheck, ArrowLeft, Layers, CalendarCheck, Crown, ScrollText
+  Receipt, Settings as SettingsIcon, LogOut, Menu, X, ShieldCheck, ArrowLeft, Layers, CalendarCheck, Crown, ScrollText, FlaskConical
 } from 'lucide-react';
 import { createAdminApi } from './api';
 import { ToastProvider } from './ui';
@@ -16,6 +16,7 @@ import Settings from './pages/Settings';
 import Bookings from './pages/Bookings';
 import Plans from './pages/Plans';
 import AuditLog from './pages/AuditLog';
+import Labs from './pages/Labs';
 import AdminPortal from '../components/AdminPortal';
 
 const NAV = [
@@ -28,6 +29,7 @@ const NAV = [
   { id: 'approvals', label: 'Approvals', icon: ClipboardCheck, badge: 'pendingApprovals' },
   { group: 'Operations' },
   { id: 'bookings', label: 'Bookings', icon: CalendarCheck },
+  { id: 'labs', label: 'Labs & privacy', icon: FlaskConical },
   { group: 'Moderation' },
   { id: 'reviews', label: 'Reviews', icon: MessageSquareWarning, badge: 'flaggedReviews' },
   { group: 'Finance' },
@@ -70,6 +72,7 @@ export default function AdminLayout({ token, username, onLogout }) {
     case 'gst': page = <GstReport api={api} />; break;
     case 'settings': page = <Settings api={api} />; break;
     case 'bookings': page = <Bookings api={api} />; break;
+    case 'labs': page = <Labs api={api} section={sub || 'labs'} go={go} />; break;
     case 'plans': page = <Plans api={api} />; break;
     case 'audit': page = <AuditLog api={api} />; break;
     case 'classic': page = <AdminPortal adminToken={token} onExpired={() => onLogout('Session expired, please log in again')} />; break;

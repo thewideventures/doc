@@ -117,6 +117,53 @@ function trustProxy() {
   return v; // e.g. "loopback, 10.0.0.0/8"
 }
 
+// ---------------------------------------------------------------- phase 4: notifications, links, ABHA, privacy
+const WA_PROVIDERS = ['meta', 'gupshup', 'msg91', 'console', 'disabled'];
+let WHATSAPP_PROVIDER = (env.WHATSAPP_PROVIDER || '').toLowerCase();
+if (WHATSAPP_PROVIDER && !WA_PROVIDERS.includes(WHATSAPP_PROVIDER)) { problems.push(`WHATSAPP_PROVIDER "${WHATSAPP_PROVIDER}" is not supported (meta | gupshup | msg91 | disabled${IS_PROD ? '' : ' | console'})`); WHATSAPP_PROVIDER = 'disabled'; }
+if (WHATSAPP_PROVIDER === 'console' && IS_PROD) { problems.push('WHATSAPP_PROVIDER=console is development-only'); WHATSAPP_PROVIDER = 'disabled'; }
+if (!WHATSAPP_PROVIDER) {
+  WHATSAPP_PROVIDER = IS_PROD ? 'disabled' : 'console';
+  warnings.push(IS_PROD ? 'WHATSAPP_PROVIDER is not set — WhatsApp reminders are OFF (in-app notifications still work).' : 'WHATSAPP_PROVIDER not set — WhatsApp reminders are printed to the server console (dev only).');
+}
+if (WHATSAPP_PROVIDER === 'meta' && (!env.META_WA_TOKEN || !env.META_WA_PHONE_NUMBER_ID)) problems.push('WHATSAPP_PROVIDER=meta needs META_WA_TOKEN and META_WA_PHONE_NUMBER_ID');
+if (WHATSAPP_PROVIDER === 'gupshup' && (!env.GUPSHUP_API_KEY || !env.GUPSHUP_SOURCE)) problems.push('WHATSAPP_PROVIDER=gupshup needs GUPSHUP_API_KEY and GUPSHUP_SOURCE');
+if (WHATSAPP_PROVIDER === 'msg91' && (!env.MSG91_AUTH_KEY || !env.MSG91_WA_NUMBER)) problems.push('WHATSAPP_PROVIDER=msg91 needs MSG91_AUTH_KEY and MSG91_WA_NUMBER');
+let WA_TEMPLATES = {};
+if (env.WHATSAPP_TEMPLATES) {
+  try { WA_TEMPLATES = JSON.parse(env.WHATSAPP_TEMPLATES); if (typeof WA_TEMPLATES !== 'object' || Array.isArray(WA_TEMPLATES)) throw new Error('x'); }
+  catch { problems.push('WHATSAPP_TEMPLATES must be a JSON object, e.g. {"reminder_24h":"fad_reminder_24h"}'); WA_TEMPLATES = {}; }
+}
+
+// SMS reminders reuse the OTP SMS provider. Off unless REMINDER_SMS=true (dev: console when no provider).
+const REMINDER_SMS = env.REMINDER_SMS === 'true';
+const REMINDER_SMS_PROVIDER = REMINDER_SMS ? (SMS_PROVIDER || (IS_PROD ? '' : 'console')) : (IS_PROD ? '' : 'console');
+if (REMINDER_SMS && IS_PROD && !SMS_PROVIDER) problems.push('REMINDER_SMS=true needs SMS_PROVIDER');
+if (REMINDER_SMS && SMS_PROVIDER === 'msg91' && !env.MSG91_REMINDER_TEMPLATE_ID) problems.push('REMINDER_SMS=true with msg91 needs MSG91_REMINDER_TEMPLATE_ID (DLT template with a ##message## variable)');
+
+const APP_BASE_URL = (env.APP_BASE_URL || CORS_ORIGINS[0] || 'http://localhost:3000').replace(/\/$/, '');
+if (IS_PROD && !APP_BASE_URL.startsWith('https://')) warnings.push('APP_BASE_URL is not https — links in reminders will be insecure');
+const BOOKING_LINK_SECRET = env.BOOKING_LINK_SECRET && !isWeak(env.BOOKING_LINK_SECRET)
+  ? env.BOOKING_LINK_SECRET
+  : crypto.createHmac('sha256', USER_JWT_SECRET || devSecret('user-jwt')).update('findadoc:booking-links:v1').digest('hex');
+if (env.BOOKING_LINK_SECRET && isWeak(env.BOOKING_LINK_SECRET)) (IS_PROD ? problems : warnings).push('BOOKING_LINK_SECRET is too weak (use at least 32 random characters)');
+
+let ABHA_PROVIDER = (env.ABHA_PROVIDER || '').toLowerCase();
+if (ABHA_PROVIDER && !['sandbox', 'mock', 'disabled'].includes(ABHA_PROVIDER)) { problems.push(`ABHA_PROVIDER "${ABHA_PROVIDER}" is not supported (sandbox | disabled${IS_PROD ? '' : ' | mock'})`); ABHA_PROVIDER = 'disabled'; }
+if (ABHA_PROVIDER === 'mock' && IS_PROD) { problems.push('ABHA_PROVIDER=mock is development-only'); ABHA_PROVIDER = 'disabled'; }
+if (!ABHA_PROVIDER) ABHA_PROVIDER = 'disabled';
+if (ABHA_PROVIDER === 'sandbox' && (!env.ABDM_CLIENT_ID || !env.ABDM_CLIENT_SECRET)) problems.push('ABHA_PROVIDER=sandbox needs ABDM_CLIENT_ID and ABDM_CLIENT_SECRET');
+if (ABHA_PROVIDER === 'sandbox' && IS_PROD) warnings.push('ABHA_PROVIDER=sandbox points at the ABDM sandbox; switch ABDM_BASE_URL to production gateway after ABDM certification.');
+
+const GRIEVANCE = {
+  name: env.GRIEVANCE_OFFICER_NAME || '',
+  email: env.GRIEVANCE_OFFICER_EMAIL || '',
+  phone: env.GRIEVANCE_OFFICER_PHONE || '',
+  address: env.GRIEVANCE_OFFICER_ADDRESS || ''
+};
+if (!GRIEVANCE.name || !GRIEVANCE.email) (IS_PROD ? warnings : []).push('GRIEVANCE_OFFICER_NAME / GRIEVANCE_OFFICER_EMAIL are not set — the DPDP / IT Rules grievance page shows placeholders.');
+const DELETION_GRACE_DAYS = env.DELETION_GRACE_DAYS ? Math.max(0, Math.min(90, Number(env.DELETION_GRACE_DAYS) || 30)) : null;
+
 if (IS_PROD && !env.MONGODB_URI) problems.push('MONGODB_URI is required in production');
 
 export const config = Object.freeze({
@@ -132,7 +179,16 @@ export const config = Object.freeze({
   trustProxy: trustProxy(),
   googleMaps: Boolean(env.VITE_GOOGLE_MAPS_API_KEY || env.GOOGLE_MAPS_API_KEY),
   serveDist: env.SERVE_DIST ? env.SERVE_DIST === 'true' : IS_PROD,
-  secureCookies: env.COOKIE_SECURE ? env.COOKIE_SECURE === 'true' : IS_PROD
+  secureCookies: env.COOKIE_SECURE ? env.COOKIE_SECURE === 'true' : IS_PROD,
+  whatsapp: { provider: WHATSAPP_PROVIDER, templates: WA_TEMPLATES, apiVersion: env.META_WA_API_VERSION || 'v21.0' },
+  reminderSms: { enabled: REMINDER_SMS || !IS_PROD, provider: REMINDER_SMS_PROVIDER },
+  appBaseUrl: APP_BASE_URL,
+  bookingLinkSecret: BOOKING_LINK_SECRET,
+  abha: { provider: ABHA_PROVIDER, baseUrl: (env.ABDM_BASE_URL || 'https://dev.abdm.gov.in').replace(/\/$/, ''), abhaBaseUrl: (env.ABHA_BASE_URL || 'https://abhasbx.abdm.gov.in').replace(/\/$/, ''), clientId: env.ABDM_CLIENT_ID || '', clientSecret: env.ABDM_CLIENT_SECRET || '', publicKey: (env.ABDM_PUBLIC_KEY || '').replace(/\\n/g, '\n') },
+  grievance: GRIEVANCE,
+  deletionGraceDays: DELETION_GRACE_DAYS,
+  schedulerCron: env.SCHEDULER_CRON || '* * * * *',
+  schedulerEnabled: env.SCHEDULER_ENABLED !== 'false'
 });
 
 export const configProblems = problems;

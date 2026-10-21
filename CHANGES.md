@@ -1,6 +1,123 @@
 # FindADoc — Changes
 
-Phase 3 (Razorpay, security hardening) is first, then phase 2, then the phase 1 admin-panel notes.
+Newest first: phase 4, phase 3 (Razorpay, security hardening), phase 2, then the phase 1 admin-panel notes.
+
+# Phase 4: triage, languages, queue, reminders, health record, labs, DPDP
+
+## Breaking changes and what to do after upgrading
+1. **Nothing new is required in the 5-key dev `.env`.** The app starts as before. In development:
+   - WhatsApp and SMS reminders print to the server console.
+   - The scheduler runs every minute.
+   - ABHA is off.
+   - Signed booking links use a key derived from the JWT secret.
+2. **Reviews need a completed booking.** `POST /api/reviews` now requires the `bookingId` of the caller's own **Completed** booking. Only one review is allowed per booking, and it is labelled "Verified visit". Old reviews stay visible.
+3. **The patient consent gate.** After their next sign-in, every patient sees the privacy notice once and makes purpose-wise consent choices (stored with timestamps in `Consent`). Health-record uploads and WhatsApp/SMS reminders only happen with the matching consent.
+4. **Production refuses unsafe phase-4 modes:**
+   - `WHATSAPP_PROVIDER=console` or an unknown provider
+   - `ABHA_PROVIDER=mock`
+   - Meta, Gupshup or MSG91 WhatsApp without their keys
+   - `ABHA_PROVIDER=sandbox` without the ABDM client id/secret
+   - `REMINDER_SMS=true` without `SMS_PROVIDER` (and, with MSG91, without `MSG91_REMINDER_TEMPLATE_ID`)
+   - invalid `WHATSAPP_TEMPLATES` JSON
+   - a weak `BOOKING_LINK_SECRET`
+   - Production also warns when `GRIEVANCE_OFFICER_*` is unset or `APP_BASE_URL` is not https.
+
+### Migrations
+- They run at startup from `runPhase4Migrations()` and are idempotent, guarded by `Counter` keys `phase4-*`. They log only when they change something.
+- What they do:
+  - Set the council-registration "verified" badge on doctors who already have a registration number plus an admin-verified registration certificate.
+  - Initialise `queueStatus: 'waiting'` on bookings from yesterday onward.
+  - Build a unique one-review-per-booking index. If duplicate reviews already exist, the index is skipped and a WARNING is logged; nothing is deleted.
+  - Build indexes for the new collections: QueueDay, ScheduledMessage, WaitlistEntry, Prescription, HealthRecord, RecordShare, Lab, LabTest, LabOrder, Consent, AbhaTxn.
+- Labs and the test catalogue are not migrated. Add them in **Admin → Labs**; the demo seed adds two demo labs in dev only.
+
+## Features (spec items 1–13)
+1. **AI triage**
+   - A rule-based multi-step flow asks about duration, severity 1–10, age, sex, pregnancy and existing conditions.
+   - Red flags (chest pain, FAST stroke signs, breathing difficulty, severe bleeding, unconsciousness, suicidal thoughts with Tele-MANAS 14416, infant fever and more) open a full-screen emergency banner. It has tel:108 and tel:112 buttons and the nearest 24×7/emergency hospitals (`GET /api/emergency/hospitals`).
+   - A "not a diagnosis" disclaimer is shown, followed by the speciality and matching doctors.
+2. **Languages (en/ml/hi)**
+   - UI dictionaries are in `src/i18n` (656 keys, parity-tested). The switcher's choice is persisted locally and in the patient's `preferredLanguage`.
+   - Symptom dictionaries cover English, Malayalam, Hindi, Manglish and Hinglish.
+   - Voice input uses en-IN, ml-IN or hi-IN.
+3. **Filters:** available today, language, gender, fee range, insurance/cashless (insurers listed by doctors and clinics), video consult, plus the existing distance and speciality filters.
+4. **Verification and reviews**
+   - The medical council name and registration number appear on profiles. The badge is admin-verified via `POST /api/admin/doctors/:id/registration`.
+   - Reviews follow the verified-visit rule above.
+5. **Live queue**
+   - There is a queue per doctor, location and day.
+   - Doctor and clinic panels can start, call next, mark done, skip, recall, pause/resume, set running late and set average consult time.
+   - Patients see their token, position and ETA, polled every 20 s (staff panels every 15 s).
+6. **Reminders**
+   - A `server/lib/messaging` abstraction covers WhatsApp (Meta Cloud API, Gupshup, MSG91, console in dev) and SMS (reusing the phase-3 provider).
+   - Messages cover booking confirmation, 24 h and 2 h reminders, "your turn soon" and medicine reminders.
+   - A node-cron scheduler sends due `ScheduledMessage`s with retry/backoff.
+   - HMAC-signed one-tap links at `/appointment/<token>` let patients view, reschedule or cancel. They expire and go stale after any change.
+   - The waitlist works per day: a freed slot is offered first come, first served, with a time-limited hold that rolls over to the next person.
+7. **Family profiles:** members have name, relation, DOB, gender and a photo. Patients can book for a member, and records are filtered per member.
+8. **Health record**
+   - Doctors write a digital prescription per booking: medicines with dosage, frequency and duration, advice, tests, follow-up date and visit notes. Private doctor notes are never shown to patients.
+   - The prescription PDF (pdfkit) carries doctor details and council number.
+   - Patients upload private lab reports (PDF or images) through the phase-3 secure upload pipeline into `private/` storage, streamed only to authorised users.
+   - There is a timeline per patient or member.
+   - Sharing with a booking's doctor is consent-based and can be revoked; withdrawing the health-data consent revokes all shares.
+9. **Follow-up and medicine reminders:** a follow-up button on the prescription (suggested date) opens booking. Medicine reminders follow the prescription schedule, in-app, plus WhatsApp/SMS on opt-in.
+10. **ABHA (optional, never mandatory)**
+    - Fields and a link/unlink flow sit behind `server/lib/abha` (disabled | mock (dev) | sandbox ABDM adapter stub).
+    - It is env-gated; every transaction is logged in `AbhaTxn` with consent rows.
+11. **Earnings and analytics** (doctor and clinic portals)
+    - Bookings, revenue, payouts, no-show rate, ratings and charts.
+    - GST invoice PDFs for subscription payments and earnings statement PDFs, scoped to the signed-in entity.
+12. **Labs**
+    - Admins manage labs and partners and the test catalogue (price, MRP, preparation, TAT, home collection, collection windows).
+    - Patients book a lab visit or home collection with address and slot, and pay via Razorpay (or mock in dev).
+    - Status runs Confirmed → SampleCollected → Processing → ReportReady.
+    - The lab or admin uploads the report into the patient's health record.
+    - The ledger gets GST and the platform commission (default 20%, commission invoice); a cancel issues a refund and a credit note.
+    - The lab partner API at `/api/lab-partner/*` uses the `X-Lab-Key` header; keys are shown once and stored hashed.
+13. **DPDP Act 2023**
+    - Privacy notice and consent screens: purpose-wise consent for health data, reminders and marketing opt-in, with timestamped consent records and withdrawal.
+    - Download my data as JSON.
+    - An account deletion request has a 30-day grace period (`DELETION_GRACE_DAYS`) that the user can cancel. After it, the scheduler anonymises the account and revokes sessions. Financial/GST ledger rows and invoices are kept with the name and phone removed.
+    - Privacy policy, terms and grievance officer pages are available in en, ml and hi.
+    - Admins get a deletion-requests view.
+
+## Fixes found by the phase-4 regression
+- The patient Profile page refetched `/api/me` in a loop: an inline parent callback re-triggered the effect, so one open page hit the global rate limit within minutes. The callback is now held in a ref.
+- The phone "Add to home screen" banner covered the sticky lab-checkout bar. It is now hidden while the cart bar is shown.
+
+## New dependencies
+- `pdfkit` ^0.17.2 for server-side PDFs (prescriptions, GST invoices, statements, lab invoices). No headless browser is used.
+- `node-cron` ^4.6.0 for the scheduler (`SCHEDULER_CRON`, default every minute).
+
+## Environment keys (all optional; see `.env.example`)
+- **WhatsApp:** `WHATSAPP_PROVIDER` (meta | gupshup | msg91 | disabled; console is dev-only), `META_WA_TOKEN`, `META_WA_PHONE_NUMBER_ID`, `META_WA_API_VERSION`, `GUPSHUP_API_KEY`, `GUPSHUP_SOURCE`, `GUPSHUP_APP_NAME`, `MSG91_WA_NUMBER`, `WHATSAPP_TEMPLATES` (JSON mapping message kinds to approved template names).
+- **SMS reminders:** `REMINDER_SMS=true` (uses `SMS_PROVIDER`), `MSG91_REMINDER_TEMPLATE_ID`.
+- **Links:** `APP_BASE_URL`, `BOOKING_LINK_SECRET` (≥32 random characters; derived from `USER_JWT_SECRET` when unset).
+- **ABHA:** `ABHA_PROVIDER` (sandbox | disabled; mock is dev-only), `ABDM_CLIENT_ID`, `ABDM_CLIENT_SECRET`, `ABDM_BASE_URL`, `ABHA_BASE_URL`, `ABDM_PUBLIC_KEY`.
+- **DPDP:** `GRIEVANCE_OFFICER_NAME`, `GRIEVANCE_OFFICER_EMAIL`, `GRIEVANCE_OFFICER_PHONE`, `GRIEVANCE_OFFICER_ADDRESS`, `DELETION_GRACE_DAYS` (0–90, default from Settings: 30).
+- **Scheduler:** `SCHEDULER_CRON`, `SCHEDULER_ENABLED` (set `false` on all but one instance).
+- **Production minimum for reminders:** a real `WHATSAPP_PROVIDER` with its keys and approved templates, or `REMINDER_SMS=true` with a DLT template. Also set `APP_BASE_URL` (https), `BOOKING_LINK_SECRET` and `GRIEVANCE_OFFICER_NAME`/`EMAIL`.
+
+## Tests
+- `npm test`: **98/98 pass** on throwaway in-memory MongoDB.
+- New test files:
+  - `p4-discovery`: triage, emergency, hospitals, i18n parity, filters, badge, verified reviews, family, follow-up, legal
+  - `p4-queue-reminders`: queue plus IDOR, 24 h/2 h reminders plus consent, signed links, waitlist
+  - `p4-health`: Rx, PDFs, private notes, private uploads with no static leak, share/revoke, ABHA off
+  - `p4-abha`: mock link/unlink
+  - `p4-business`: earnings/invoice IDOR, labs end to end with ledger, GST and commission, credit note, DPDP export/deletion/anonymisation
+  - `config.test`: production refusals
+- Headless Chrome (dist served by Express, CSP on) passed 16/16 flows on mobile and desktop widths with 0 console errors, 0 CSP violations and 0 HTTP errors. The flows covered: home and language switch, emergency and routine triage, filters, legal, doctor profile and booking, patient bookings with the queue card and reschedule, records upload, labs checkout to mock pay to tracking, privacy centre, profile and family, the signed manage link with cancel, doctor queue/earnings/Rx (desktop and mobile), clinic, and every admin section.
+- `npm audit`: 0 vulnerabilities.
+
+## Known limits
+- The admin console and some older doctor/clinic portal screens are still English only. The patient app and all new panels are translated.
+- PDFs use the built-in Latin fonts, so amounts show "Rs." and Malayalam/Hindi names are transliterated in PDFs. Embedding a Noto font would fix this.
+- Live updates use polling, not SSE.
+- The ABDM sandbox adapter is a documented stub that has not been run against the real ABDM sandbox. Production use needs ABDM onboarding and certification.
+- Nearest hospitals come from listed clinics marked 24×7, emergency or hospital, plus a Google Maps search link. No third-party places API is used.
+
 
 # Phase 3: Razorpay payments and security hardening
 

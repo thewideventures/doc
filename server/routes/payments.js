@@ -7,6 +7,7 @@ import { rateLimit, userKey } from '../lib/rateLimit.js';
 import { getProviderByName, getPaymentProvider, paymentsPublicConfig, paymentsNotConfigured } from '../lib/payments/index.js';
 import { verifyClientPayment, processWebhookEvent } from '../lib/payments/apply.js';
 import { failPaymentOrder, bookingView, httpError } from '../lib/bookings.js';
+import { labOrderView, failLabPayment } from '../lib/labs.js';
 import { startCheckout } from '../lib/subscriptions.js';
 import { getPlans, effectivePlan, planSummary } from '../lib/plans.js';
 import { parsePaging } from '../lib/http.js';
@@ -48,6 +49,7 @@ paymentsRouter.post('/verify',
       const booking = r.booking;
       return res.json({ success: true, booking: bookingView(booking), message: booking.status === 'Pending' ? 'Payment successful — waiting for the doctor to accept your booking.' : 'Payment successful — your appointment is confirmed!' });
     }
+    if (r.labOrder) return res.json({ success: true, labOrder: labOrderView(r.labOrder), message: `Payment successful — lab order ${r.labOrder.orderCode} is confirmed.` });
     const out = r.subscription;
     res.json({ success: true, message: `${out.plan.name} plan activated. Invoice ${out.invoice.invoiceNumber}.`, invoice: { invoiceNumber: out.invoice.invoiceNumber, totalAmount: out.invoice.totalAmount, cgst: out.invoice.cgst, sgst: out.invoice.sgst, igst: out.invoice.igst, taxableValue: out.invoice.taxableValue } });
   }));
@@ -56,6 +58,7 @@ paymentsRouter.post('/fail', requireUser(), validate({ body: z.object({ orderId:
   const order = await PaymentOrder.findOne({ id: req.body.orderId });
   if (!order || !ownsOrder(req.auth, order)) throw httpError(404, 'Payment order not found');
   await failPaymentOrder(order, (req.body.reason || 'Payment cancelled by user').slice(0, 200));
+  if (order.purpose === 'lab_order') await failLabPayment(order);
   res.json({ success: true, message: 'Payment cancelled. Your slot hold was released.' });
 }));
 

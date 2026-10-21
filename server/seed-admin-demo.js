@@ -11,7 +11,7 @@
 // All demo rows use ids starting with "demo-" so --clean removes exactly them.
 // =============================================================================
 import mongoose from 'mongoose';
-import { Doctor, Clinic, User, Review, Booking, LedgerTransaction, PayoutRequest, PaymentOrder, Notification } from './models/index.js';
+import { Doctor, Clinic, User, Review, Booking, LedgerTransaction, PayoutRequest, PaymentOrder, Notification, Lab, LabTest } from './models/index.js';
 import { ensurePlans } from './lib/plans.js';
 import { toPoint } from './lib/geo.js';
 import { istInstant, todayIST, addDays } from './lib/time.js';
@@ -41,7 +41,8 @@ async function clean() {
     LedgerTransaction.deleteMany({ $or: [{ partyId: DEMO }, { bookingId: DEMO }] }),
     PayoutRequest.deleteMany({ id: DEMO }),
     PaymentOrder.deleteMany({ $or: [{ partyId: DEMO }, { refId: DEMO }] }),
-    Notification.deleteMany({ recipientId: DEMO })
+    Notification.deleteMany({ recipientId: DEMO }),
+    Lab.deleteMany({ id: DEMO }), LabTest.deleteMany({ id: DEMO })
   ]);
   console.log('Removed demo rows:', r.map(x => x.deletedCount).join(' / '), '(doctors/clinics/users/reviews/bookings/txns/payouts/orders/notifications)');
 }
@@ -79,6 +80,8 @@ async function seed() {
       addressDetails: (() => { const city = pick(['Kochi', 'Bengaluru', 'Chennai', 'Mumbai', 'Delhi'], i); return { line: `${10 + i} MG Road`, area: pick(['Central', 'North', 'East'], i), city, district: CITY[city][2], state, pincode: `${CITY[city][3]}${String(10 + i).padStart(2, '0')}`, formatted: '' }; })(),
       location: (() => { const city = pick(['Kochi', 'Bengaluru', 'Chennai', 'Mumbai', 'Delhi'], i); return toPoint(CITY[city][0] + i * 0.004, CITY[city][1] + i * 0.003); })(),
       facilities: ['Pharmacy', 'Lab', 'Parking', 'Wheelchair access'].slice(0, 2 + (i % 3)),
+      insurers: [['Star Health', 'HDFC ERGO'], ['Niva Bupa', 'Star Health', 'ICICI Lombard'], []][i % 3],
+      is24x7: i % 3 === 1, emergencyServices: i % 3 === 1,
       subscription: i % 3 === 0 ? { planCode: 'pro', planName: 'Clinic Pro', startedAt: daysAgo(10), expiresAt: new Date(Date.now() + 20 * 86400000), source: 'demo' } : { planCode: 'basic', planName: 'Clinic Basic', source: 'default' },
       isPremium: i % 3 === 0
     });
@@ -105,6 +108,8 @@ async function seed() {
       photo: '', bio: 'Demo profile for testing. Experienced consultant focused on evidence-based, patient-friendly care.',
       registrationNumber: `TCMC-${40000 + i}`, councilName: 'Travancore-Cochin Medical Council', languages: ['English', pick(['Malayalam', 'Hindi', 'Tamil', 'Kannada'], i)],
       gender: i % 2 ? 'female' : 'male', slug: `demo-doctor-${i + 1}`,
+      registrationVerified: status === 'active' && i % 2 === 0, registrationVerifiedAt: status === 'active' && i % 2 === 0 ? daysAgo(20) : null,
+      insurers: i % 3 === 0 ? ['Star Health', 'Care Health'] : [],
       subscription: i % 4 === 0 ? { planCode: i % 8 === 0 ? 'premium' : 'pro', planName: i % 8 === 0 ? 'Doctor Premium' : 'Doctor Pro', startedAt: daysAgo(5), expiresAt: new Date(Date.now() + 25 * 86400000), source: 'demo' } : { planCode: 'basic', planName: 'Doctor Basic', source: 'default' }
     });
     const cityName = clinic.addressDetails.city;
@@ -218,6 +223,26 @@ async function seed() {
     const date = addDays(today, k % 2 ? 1 : 2);
     const time = `${String(9 + k).padStart(2, '0')}:00`;
     await Booking.create({ id: `demo-up-${k}`, bookingCode: `FAD-U${k}`, doctorId: d.id, doctorName: d.name, clinicId: loc.clinicId, clinicName: loc.name, locationId: loc.id, locationKind: loc.kind, locationName: loc.name, patientUserId: p.id, patientName: p.name, patientPhone: p.phone, date, timeSlot: time, slotStart: istInstant(date, time), slotLock: `${d.id}|${date}|${time}`, source: 'online', bookingMode: 'free', fee: loc.fee, bookingPremiumFee: 0, totalAmount: loc.fee, amountDueAtClinic: loc.fee, payeeType: 'clinic', payeeId: loc.clinicId, paymentStatus: 'pay_at_clinic', isPaid: false, status: k % 3 === 0 ? 'Pending' : 'Confirmed', invoiceNumber: '' });
+  }
+  // Labs + test catalogue (phase 4)
+  const labs = [
+    { id: 'demo-lab-1', name: 'Amrita Diagnostics (Demo)', accreditation: 'NABL', city: 'Kochi', address: '12 Lab Street, Kochi', pincodes: [], gstin: '32AABCA1234B1Z5', stateCode: '32', commissionPercent: 15 },
+    { id: 'demo-lab-2', name: 'CityCare Labs (Demo)', accreditation: 'NABL', city: 'Bengaluru', address: '5 Residency Road, Bengaluru', pincodes: [], gstin: '', stateCode: '29', commissionPercent: 12, type: 'partner' }
+  ];
+  for (const l of labs) await Lab.create({ type: 'lab', homeCollection: true, phone: '+91 90000 40000', ...l });
+  const tests = [
+    ['CBC', 'Complete Blood Count (CBC)', 'Haematology', 350, 'No fasting needed', 12],
+    ['FBS', 'Fasting Blood Sugar', 'Diabetes', 120, '10–12 hours fasting (water allowed)', 6],
+    ['HBA1C', 'HbA1c (3-month sugar average)', 'Diabetes', 450, 'No fasting needed', 24],
+    ['LIPID', 'Lipid Profile', 'Heart', 600, '10–12 hours fasting', 24],
+    ['TSH', 'Thyroid Stimulating Hormone (TSH)', 'Thyroid', 300, 'Morning sample preferred', 24],
+    ['LFT', 'Liver Function Test', 'Liver', 650, '8 hours fasting preferred', 24],
+    ['KFT', 'Kidney Function Test', 'Kidney', 600, 'No special preparation', 24],
+    ['VITD', 'Vitamin D (25-OH)', 'Vitamins', 1200, 'No fasting needed', 48]
+  ];
+  let ti = 0;
+  for (const l of labs) for (const [code, name, category, price, preparation, tatHours] of tests) {
+    await LabTest.create({ id: `demo-lt-${++ti}`, labId: l.id, code, name, category, price: l.id === 'demo-lab-2' ? Math.round(price * 0.9) : price, mrp: Math.round(price * 1.3), preparation, tatHours, sampleType: 'Blood', homeCollection: true });
   }
   console.log(`Seeded demo data: ${clinics.length} clinics, ${doctors.length} doctors, ${patients.length} patients, 30 reviews, ${events.length} ledger transactions, ${payoutPlan.length} payout requests.`);
 }

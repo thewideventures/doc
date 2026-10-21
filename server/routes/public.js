@@ -15,6 +15,9 @@ import { publicDoctor, publicClinic, selfDoctor, selfClinic, selfUser, doctorSlu
 import { normalizeAddress, toPoint, formatAddress, latLng, haversineKm } from '../lib/geo.js';
 import { buildLocation, syncDoctorPrimaryLocation } from '../lib/locations.js';
 import { availability, upcomingDates, createBooking, bookingView, quote, onlinePaymentsAllowed, findLocation, httpError } from '../lib/bookings.js';
+import { detectRedFlags, pendingQuestions, scoreSpecialities, urgencyFor, adjustSpeciality, EMERGENCY_NUMBERS, MENTAL_HEALTH_HELPLINE, DURATIONS, CONDITIONS } from '../lib/triage/index.js';
+import { RED_FLAGS } from '../lib/triage/dictionary.js';
+import { slotsForDate, todayIST, istInstant } from '../lib/time.js';
 import { getSettings } from '../lib/settings.js';
 import { round2, stateCodeFromName, stateCodeFromGstin, isValidGstin, STATE_CODES } from '../lib/gst.js';
 import { escapeRegex } from '../lib/http.js';
@@ -195,7 +198,7 @@ function distanceFor(doc, user) {
 }
 
 router.get('/doctors', wrap(async (req, res) => {
-  const { speciality, sector, minExp, minRating, search, clinicId, sortBy = 'recommended', mode, kind, gender, language } = req.query;
+  const { speciality, sector, minExp, minRating, search, clinicId, sortBy = 'recommended', mode, kind, gender, language, insurer } = req.query;
   const query = { status: 'active' };
   const and = [];
   if (speciality && speciality !== 'all') query.specialities = { $regex: new RegExp(escapeRegex(String(speciality)), 'i') };
@@ -211,14 +214,35 @@ router.get('/doctors', wrap(async (req, res) => {
     const re = new RegExp(escapeRegex(String(search).trim()), 'i');
     and.push({ $or: [{ name: re }, { title: re }, { specialities: re }, { qualifications: re }, { 'clinics.clinicName': re }, { 'consultationLocations.name': re }, { 'consultationLocations.address.city': re }, { 'consultationLocations.address.area': re }, { 'consultationLocations.address.pincode': re }, { 'addressDetails.city': re }] });
   }
+  if (insurer && String(insurer).trim()) {
+    const re = new RegExp(`^${escapeRegex(String(insurer).trim().slice(0, 80))}$`, 'i');
+    const clinicIds = (await Clinic.find({ status: 'active', insurers: re }).select('id').limit(2000).lean()).map(c => c.id);
+    and.push({ $or: [{ insurers: re }, { consultationLocations: { $elemMatch: { clinicId: { $in: clinicIds }, isActive: { $ne: false } } } }] });
+  }
+  if (req.query.video === 'true') and.push({ consultationLocations: { $elemMatch: { kind: 'online', isActive: { $ne: false } } } });
   if (and.length) query.$and = and;
   const docs = await Doctor.find(query).select('-documents -claimPendingFee -payoutPendingFee -claimedFee -gstin -statusBeforeSuspension -phone -email').limit(500).lean();
 
   const lat = parseFloat(req.query.userLat), lng = parseFloat(req.query.userLng);
   const user = Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
   const maxKm = parseFloat(req.query.maxKm);
+  const minFee = parseFloat(req.query.minFee), maxFee = parseFloat(req.query.maxFee);
+  const feeOk = l => (!Number.isFinite(minFee) || (l.fee || 0) >= minFee) && (!Number.isFinite(maxFee) || (l.fee || 0) <= maxFee);
+  // "Available today": at least one free, still-bookable slot today at an active location
+  let todayOpen = null;
+  if (req.query.availableToday === 'true') {
+    const today = todayIST();
+    const taken = await Booking.find({ doctorId: { $in: docs.map(d => d.id) }, date: today, slotLock: { $exists: true } }).select('doctorId timeSlot').lean();
+    const takenBy = new Map();
+    for (const t of taken) { if (!takenBy.has(t.doctorId)) takenBy.set(t.doctorId, new Set()); takenBy.get(t.doctorId).add(t.timeSlot); }
+    const earliest = Date.now() + 15 * 60000;
+    todayOpen = new Set(docs.filter(d => d.bookingEnabled !== false && activeLocations(d).some(l => slotsForDate(l.schedule || {}, today)
+      .some(t => istInstant(today, t).getTime() >= earliest && !takenBy.get(d.id)?.has(t)))).map(d => d.id));
+  }
   let results = [];
   for (const d of docs) {
+    if (todayOpen && !todayOpen.has(d.id)) continue;
+    if ((Number.isFinite(minFee) || Number.isFinite(maxFee)) && !activeLocations(d).some(feeOk)) continue;
     const ep = await effectivePlan(d, 'doctor');
     const dist = distanceFor(d, user);
     if (user && Number.isFinite(maxKm) && maxKm > 0) {
@@ -240,6 +264,15 @@ router.get('/doctors', wrap(async (req, res) => {
   res.json({ success: true, total: results.length, doctors: results });
 }));
 
+// Insurers / cashless partners accepted by listed doctors and clinics (for the filter dropdown)
+router.get('/insurers', wrap(async (req, res) => {
+  const [a, b] = await Promise.all([Doctor.distinct('insurers', { status: 'active' }), Clinic.distinct('insurers', { status: 'active' })]);
+  const seen = new Map();
+  for (const n of [...a, ...b]) { const k = String(n || '').trim(); if (k && !seen.has(k.toLowerCase())) seen.set(k.toLowerCase(), k); }
+  res.set('Cache-Control', 'public, max-age=300');
+  res.json({ insurers: [...seen.values()].sort((x, y) => x.localeCompare(y)) });
+}));
+
 async function findPublicDoctor(idOrSlug) {
   const key = String(idOrSlug || '').slice(0, 120);
   return Doctor.findOne({ $or: [{ id: key }, { slug: key }] });
@@ -251,7 +284,7 @@ router.get('/doctors/:id', wrap(async (req, res) => {
   if (doctor.status === 'suspended') { const m = statusMessage('doctor', doctor); throw Object.assign(new Error(m.error), { status: 403, code: m.code }); }
   if (doctor.status !== 'active') throw httpError(404, 'This doctor profile is not publicly listed yet');
   const ep = await effectivePlan(doctor, 'doctor');
-  const reviews = await Review.find({ doctorId: doctor.id, ...PUBLIC_REVIEW_FILTER }).select('-_id -__v -userPhone -badWordsFound -flagReason -moderationNote').sort({ createdAt: -1 }).limit(50).lean();
+  const reviews = await Review.find({ doctorId: doctor.id, ...PUBLIC_REVIEW_FILTER }).select('-_id -__v -userPhone -userId -bookingId -badWordsFound -flagReason -moderationNote').sort({ createdAt: -1 }).limit(50).lean();
   const settings = await getSettings();
   const out = publicDoctor(doctor, ep);
   for (const l of out.locations) {
@@ -450,35 +483,56 @@ router.post('/clinics/:id/approve-doctor', gone('Use /api/clinic-portal/doctors/
 router.post('/clinics/:id/remove-doctor', gone('Use DELETE /api/clinic-portal/doctors/:doctorId (sign in required).'));
 
 // ---------------------------------------------------------------------------
-// AI SYMPTOM TRIAGE (keyword based; multilingual keyword lists live on specialities)
+// AI SYMPTOM TRIAGE — rule-based, multi-step, multilingual (en / ml / hi incl. Manglish / Hinglish).
+// Step 1: free text -> red-flag screen + follow-up questions. Step 2: answers -> urgency + speciality + doctors.
+// Red flags always win: the client shows a full-screen emergency banner (108 / 112) and nearest hospitals.
 // ---------------------------------------------------------------------------
-const EMERGENCY = ['emergency', 'severe chest pain', 'chest pain', 'cannot breathe', "can't breathe", 'unconscious', 'paralysis', 'stroke', 'vomiting blood', 'choking', 'bleeding heavily', 'heart attack', 'seizure', 'fits', 'suicide',
-  'बेहोश', 'सांस बंद', 'गंभीर', 'दिल का दौरा', 'നെഞ്ചുവേദന', 'ബോധം', 'ശ്വാസം മുട്ടൽ', 'urgencia', 'emergencia'];
-const PRIORITY = ['severe', 'high fever', 'breathing', 'blood', 'fracture', 'pregnan', 'infant', 'baby', 'दर्द', 'तेज बुखार', 'കടുത്ത പനി', 'വേദന', 'dolor fuerte'];
+const triageSchema = z.object({
+  symptomsText: z.string().trim().min(1, 'Please describe your symptoms').max(1000),
+  lang: z.enum(['en', 'ml', 'hi']).default('en'),
+  userLat: z.coerce.number().min(-90).max(90).optional(),
+  userLng: z.coerce.number().min(-180).max(180).optional(),
+  skipQuestions: z.boolean().optional(),
+  answers: z.object({
+    warning: z.array(z.enum(Object.keys(RED_FLAGS))).max(12).optional(),
+    duration: z.enum(DURATIONS).optional(),
+    severity: z.coerce.number().int().min(1).max(10).optional(),
+    age: z.coerce.number().int().min(0).max(120).optional(),
+    ageMonths: z.coerce.number().int().min(0).max(11).optional(),
+    sex: z.enum(['male', 'female', 'other']).optional(),
+    pregnancy: z.enum(['yes', 'no', 'unsure']).optional(),
+    conditions: z.array(z.enum(CONDITIONS)).max(10).optional()
+  }).default({})
+});
 
-router.post('/ai-symptom-triage', rateLimit({ name: 'triage', windowMs: 60 * 1000, max: 30 }), wrap(async (req, res) => {
-  const symptomsText = str(req.body?.symptomsText, 1000);
-  if (!symptomsText) throw bad('Please describe your symptoms');
-  const text = symptomsText.toLowerCase();
+const DISCLAIMER = 'This is automated guidance, not a medical diagnosis. It cannot rule out serious illness. If you feel very unwell or are worried, call 108 or go to the nearest hospital.';
+
+router.post('/ai-symptom-triage', rateLimit({ name: 'triage', windowMs: 60 * 1000, max: 30 }), validate({ body: triageSchema }), wrap(async (req, res) => {
+  const { symptomsText, answers, skipQuestions } = req.body;
+  const redFlags = detectRedFlags(symptomsText, answers);
+  const emergency = redFlags.length > 0;
+  const base = {
+    success: true, query: symptomsText, disclaimer: DISCLAIMER, redFlags: redFlags.map(f => ({ id: f.id, label: f.label })), emergency,
+    emergencyNumbers: emergency ? [...EMERGENCY_NUMBERS, ...(redFlags.some(f => RED_FLAGS[f.id]?.helpline) ? [MENTAL_HEALTH_HELPLINE] : [])] : EMERGENCY_NUMBERS
+  };
+  if (emergency) {
+    return res.json({ ...base, stage: 'emergency', urgencyLevel: 'emergency', urgency: 'Emergency — call 108 / 112 or go to the nearest hospital now', nextSteps: 'Do not wait for an appointment. Call 108 (ambulance) or 112, or go to the nearest emergency department.' });
+  }
+  const pending = skipQuestions ? [] : pendingQuestions(answers);
+  if (pending.length) return res.json({ ...base, stage: 'questions', questions: pending });
+
   const all = await Speciality.find().lean();
-  const scored = all.map(spec => {
-    const matched = [];
-    let score = 0;
-    for (const kw of spec.keywords || []) if (kw && text.includes(String(kw).toLowerCase())) { score += 10; matched.push(kw); }
-    if (text.includes(spec.name.toLowerCase())) { score += 20; matched.push(spec.name); }
-    return { spec, score, matched };
-  }).sort((a, b) => b.score - a.score);
-  const top = scored[0]?.score > 0 ? scored[0] : { spec: all.find(s => s.id === 'general_physician') || all[0], score: 0, matched: [] };
-  if (!top.spec) throw httpError(503, 'Specialities are not configured yet');
-  const alternatives = scored.filter(s => s.score > 0 && s.spec.id !== top.spec.id).slice(0, 2).map(s => ({ id: s.spec.id, name: s.spec.name }));
-  let urgencyLevel = 'routine', urgency = 'Routine consultation';
-  if (EMERGENCY.some(k => text.includes(k))) { urgencyLevel = 'emergency'; urgency = 'Emergency — go to the nearest hospital / call 112 now'; }
-  else if (PRIORITY.some(k => text.includes(k))) { urgencyLevel = 'priority'; urgency = 'See a doctor within 24 hours'; }
+  const scored = scoreSpecialities(symptomsText, all);
+  const chosen = adjustSpeciality(scored, answers) || { spec: all.find(s => s.id === 'general_physician') || all[0], score: 0, matched: [] };
+  if (!chosen.spec) throw httpError(503, 'Specialities are not configured yet');
+  const alternatives = scored.filter(s => s.score > 0 && s.spec.id !== chosen.spec.id).slice(0, 2).map(s => ({ id: s.spec.id, name: s.spec.name }));
+  const u = urgencyFor(symptomsText, answers);
+  const urgencyLevel = u.level;
+  const urgency = urgencyLevel === 'priority' ? 'See a doctor within 24 hours' : 'Routine consultation';
 
-  const docs = await Doctor.find({ status: 'active', specialities: { $regex: new RegExp(escapeRegex(top.spec.name), 'i') } })
+  const docs = await Doctor.find({ status: 'active', specialities: { $regex: new RegExp(escapeRegex(chosen.spec.name), 'i') } })
     .select('-documents -phone -email -gstin -claimPendingFee -payoutPendingFee -claimedFee').limit(60).lean();
-  const lat = parseFloat(req.body?.userLat), lng = parseFloat(req.body?.userLng);
-  const user = Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+  const user = Number.isFinite(req.body.userLat) && Number.isFinite(req.body.userLng) ? { lat: req.body.userLat, lng: req.body.userLng } : null;
   const ranked = [];
   for (const d of docs) {
     const ep = await effectivePlan(d, 'doctor');
@@ -488,21 +542,47 @@ router.post('/ai-symptom-triage', rateLimit({ name: 'triage', windowMs: 60 * 100
   ranked.sort((a, b) => b._f - a._f || b._p - a._p || (a.distance ?? 1e9) - (b.distance ?? 1e9) || (b.rating || 0) - (a.rating || 0));
   const matchingDoctors = ranked.slice(0, 6).map(({ _f, _p, ...d }) => d);
   res.json({
-    success: true,
-    query: symptomsText,
-    detectedIllnessCategory: top.spec.name,
-    specialityId: top.spec.id,
-    alternatives,
-    confidence: top.score >= 20 ? 'High' : top.score > 0 ? 'Medium' : 'Low (general screening)',
-    matchedKeywords: top.matched,
-    urgency, urgencyLevel,
-    aiExplanation: top.score > 0
-      ? `Your symptoms ("${symptomsText.slice(0, 120)}") match ${top.spec.name}. ${top.spec.description ? `They specialise in ${String(top.spec.description).toLowerCase()}.` : ''}`
+    ...base, stage: 'result',
+    detectedIllnessCategory: chosen.spec.name, specialityId: chosen.spec.id, alternatives,
+    confidence: chosen.score >= 20 ? 'High' : chosen.score > 0 ? 'Medium' : 'Low (general screening)',
+    matchedKeywords: chosen.matched.slice(0, 6), urgency, urgencyLevel, urgencyReasons: u.reasons,
+    aiExplanation: chosen.score > 0
+      ? `Your symptoms match ${chosen.spec.name}. ${chosen.spec.description ? `They specialise in ${String(chosen.spec.description).toLowerCase()}.` : ''}`
       : 'We could not match a specific speciality, so a General Physician is the best first step.',
-    nextSteps: urgencyLevel === 'emergency' ? 'Please go to the nearest emergency room or dial 112 immediately. Do not wait for an appointment.' : `Book a verified ${top.spec.name} below.`,
-    disclaimer: 'This is guidance, not a diagnosis. Always consult a qualified doctor.',
+    nextSteps: urgencyLevel === 'priority' ? `Please see a ${chosen.spec.name} within 24 hours. If symptoms get worse, call 108.` : `Book a verified ${chosen.spec.name} below.`,
     matchingDoctorsCount: matchingDoctors.length,
     matchingDoctors
+  });
+}));
+
+// Nearest hospitals / 24x7 clinics for the emergency banner. Phone numbers are shown in full here on purpose
+// (emergency use) but the endpoint is rate limited against scraping.
+router.get('/emergency/hospitals', rateLimit({ name: 'emergency-hospitals', windowMs: 10 * 60 * 1000, max: 30 }),
+  validate({ query: z.object({ lat: z.coerce.number().min(-90).max(90), lng: z.coerce.number().min(-180).max(180) }) }),
+  wrap(async (req, res) => {
+    const user = { lat: req.query.lat, lng: req.query.lng };
+    const clinics = await Clinic.find({ status: 'active', $or: [{ is24x7: true }, { emergencyServices: true }, { type: /hospital/i }] })
+      .select('id name type address phone location latitude longitude is24x7 emergencyServices').limit(1000).lean();
+    const list = clinics.map(c => {
+      const p = latLng(c.location) || (Number.isFinite(c.latitude) ? { lat: c.latitude, lng: c.longitude } : null);
+      return { c, p, d: p ? haversineKm(user, p) : null };
+    }).filter(x => x.d !== null && x.d <= 50).sort((a, b) => a.d - b.d).slice(0, 5);
+    res.json({
+      hospitals: list.map(({ c, p, d }) => ({
+        id: c.id, name: c.name, type: c.type, address: c.address, distanceKm: d, is24x7: Boolean(c.is24x7), emergencyServices: Boolean(c.emergencyServices),
+        phone: canonicalPhone(c.phone) || '', directionsUrl: `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lng}`
+      })),
+      mapsSearchUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent('hospital emergency near me')}`
+    });
+  }));
+
+// Grievance officer + legal contact (DPDP Act 2023 / IT Rules 2021)
+router.get('/legal/contact', wrap(async (req, res) => {
+  const g = config.grievance;
+  res.set('Cache-Control', 'public, max-age=600');
+  res.json({
+    grievanceOfficer: { name: g.name || 'Grievance Officer (to be appointed)', email: g.email || 'grievance@example.com', phone: g.phone || '', address: g.address || '', configured: Boolean(g.name && g.email) },
+    responseTimeDays: 30, acknowledgementHours: 24, dataProtectionBoard: 'https://www.meity.gov.in/data-protection-framework'
   });
 }));
 
@@ -524,7 +604,8 @@ router.post('/bookings',
   validate({ body: z.object({
     doctorId: z.string().trim().min(1).max(80), locationId: z.string().trim().max(60).default(''),
     date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Choose a valid date'), time: z.string().regex(/^\d{2}:\d{2}$/).optional(), timeSlot: z.string().max(10).optional(),
-    memberId: z.string().max(60).optional(), patientName: z.string().max(120).optional(), note: z.string().max(500).optional()
+    memberId: z.string().max(60).optional(), patientName: z.string().max(120).optional(), note: z.string().max(500).optional(),
+    followUpOf: z.string().max(80).optional()
   }) }),
   wrap(async (req, res) => {
     const b = req.body;
@@ -542,10 +623,17 @@ router.post('/bookings',
     // limit open bookings per patient to prevent slot hoarding
     const open = await Booking.countDocuments({ patientUserId: u.id, status: { $in: ['AwaitingPayment', 'Pending', 'Confirmed'] }, slotStart: { $gte: new Date() } });
     if (open >= 10) throw bad('You have too many upcoming bookings. Please complete or cancel some first.');
+    let followUpOf = '';
+    if (b.followUpOf) {
+      const prev = await Booking.findOne({ id: b.followUpOf, patientUserId: u.id, doctorId: doctor.id, status: { $in: ['Completed', 'Confirmed'] } }).select('id forMember').lean();
+      if (!prev) throw bad('The original visit for this follow-up was not found');
+      if ((prev.forMember?.id || '') !== (forMember?.id || '')) throw bad('A follow-up must be for the same patient as the original visit');
+      followUpOf = prev.id;
+    }
     const out = await createBooking({
       doctor, locationId: str(b.locationId, 60), date: str(b.date, 10), time: str(b.time || b.timeSlot, 5),
       patient: { userId: u.id, name: patientName, phone: u.phone, stateCode: u.stateCode || stateCodeFromName(u.addressDetails?.state) },
-      forMember, note: cleanText(b.note, 500), source: 'online'
+      forMember, note: cleanText(b.note, 500), source: 'online', followUpOf
     });
     res.json({
       success: true,
@@ -567,28 +655,38 @@ router.get('/bookings', requireUser('patient'), wrap(async (req, res) => {
 // REVIEWS (signed-in patients)
 // ---------------------------------------------------------------------------
 router.post('/reviews', requireUser('patient'), rateLimit({ name: 'review', windowMs: 24 * 3600 * 1000, max: 10, key: userKey }),
-  validate({ body: z.object({ doctorId: z.string().trim().min(1).max(80), rating: z.coerce.number().int().min(1, 'Rating must be between 1 and 5').max(5, 'Rating must be between 1 and 5'), comment: z.string().max(5000).default(''), userName: z.string().max(60).optional() }) }),
+  validate({ body: z.object({ bookingId: z.string().trim().min(1, 'Reviews can only be written for a completed visit').max(80), doctorId: z.string().trim().max(80).optional(), rating: z.coerce.number().int().min(1, 'Rating must be between 1 and 5').max(5, 'Rating must be between 1 and 5'), comment: z.string().max(5000).default(''), userName: z.string().max(60).optional() }) }),
   wrap(async (req, res) => {
-  const { doctorId, rating, comment } = req.body;
-  const r = rating;
+  const { bookingId, rating, comment } = req.body;
   const text = cleanText(comment, 3000);
   if (text.length < 5) throw bad('Please write a few words about your experience');
-  const doctor = await Doctor.findOne({ id: str(doctorId, 80) }).lean();
-  if (!doctor || doctor.status !== 'active') throw httpError(404, 'Doctor not found');
   const u = req.auth.user;
-  if (await Review.findOne({ doctorId: doctor.id, userPhone: u.phone, moderationStatus: { $ne: 'deleted' } })) throw bad('You have already reviewed this doctor');
-  const visit = await Booking.findOne({ doctorId: doctor.id, $or: [{ patientUserId: u.id }, { patientPhone: u.phone }], status: { $in: ['Completed', 'Confirmed'] } }).lean();
+  // Only the patient of a COMPLETED booking may review, once per booking ("Verified visit")
+  const visit = await Booking.findOne({ id: bookingId, patientUserId: u.id }).lean();
+  if (!visit) throw httpError(404, 'Booking not found');
+  if (visit.status !== 'Completed') throw httpError(403, 'You can review a doctor after your visit is marked completed', 'VISIT_NOT_COMPLETED');
+  if (req.body.doctorId && req.body.doctorId !== visit.doctorId) throw bad('This booking is with a different doctor');
+  const doctor = await Doctor.findOne({ id: visit.doctorId }).lean();
+  if (!doctor || doctor.status !== 'active') throw httpError(404, 'Doctor not found');
+  if (await Review.exists({ bookingId: visit.id })) throw httpError(409, 'You have already reviewed this visit', 'ALREADY_REVIEWED');
   const settings = await getSettings();
   const screen = screenReviewText(text, settings);
-  const review = await Review.create({
-    id: `rev-${Date.now()}`, doctorId: doctor.id, userName: cleanText(req.body?.userName, 60) || u.name || 'Verified Patient', userPhone: u.phone,
-    isVerifiedBooking: Boolean(visit), rating: r, comment: text, ...screen,
-    sentiment: screen.isFlagged ? 'flagged' : r >= 4 ? 'positive' : r === 3 ? 'neutral' : 'negative',
-    moderationStatus: screen.isFlagged ? 'flagged' : 'visible', date: new Date().toISOString().slice(0, 10)
-  });
+  let review;
+  try {
+    review = await Review.create({
+      id: `rev-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`, doctorId: doctor.id, bookingId: visit.id, userId: u.id,
+      userName: cleanText(req.body?.userName, 60) || u.name || 'Verified Patient', userPhone: u.phone,
+      isVerifiedBooking: true, verifiedVisit: true, rating, comment: text, ...screen,
+      sentiment: screen.isFlagged ? 'flagged' : rating >= 4 ? 'positive' : rating === 3 ? 'neutral' : 'negative',
+      moderationStatus: screen.isFlagged ? 'flagged' : 'visible', date: new Date().toISOString().slice(0, 10)
+    });
+  } catch (e) {
+    if (e?.code === 11000) throw httpError(409, 'You have already reviewed this visit', 'ALREADY_REVIEWED');
+    throw e;
+  }
   await recalcDoctorRating(doctor.id);
   const out = review.toObject();
-  delete out.badWordsFound; delete out.userPhone; delete out._id;
+  delete out.badWordsFound; delete out.userPhone; delete out._id; delete out.userId;
   res.json({ success: true, moderated: screen.isFlagged, message: screen.isFlagged ? 'Thanks! Your review is awaiting moderation.' : 'Review published!', review: out });
 }));
 

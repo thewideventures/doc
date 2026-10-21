@@ -136,7 +136,7 @@ export function sanitizeRequest(req, res, next) {
 }
 
 /** Final safety net on every JSON response: strip secret fields and private storage keys. */
-const NEVER = new Set(['passwordHash', 'tokenHash', 'codeHash', 'otpHash', 'totpSecret', 'refreshToken', '__v', 'slotLock']);
+const NEVER = new Set(['passwordHash', 'tokenHash', 'codeHash', 'otpHash', 'totpSecret', 'refreshToken', '__v', 'slotLock', 'partnerKeyHash']);
 function scrubOut(v, depth = 0) {
   if (!v || typeof v !== 'object' || depth > 12) return v;
   if (Array.isArray(v)) { for (const x of v) scrubOut(x, depth + 1); return v; }

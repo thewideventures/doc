@@ -1,125 +1,66 @@
-import React, { useState } from 'react';
-import { X, Star, CheckCircle, MessageSquare } from 'lucide-react';
-import { createClient, getSession } from '../lib/api';
+import React, { useEffect, useState } from 'react';
+import { X, Star, BadgeCheck } from 'lucide-react';
+import { createClient, getSession, fmtDate } from '../lib/api';
+import { useT } from '../i18n';
 
-export default function ReviewModal({ doctor, user, isOpen, onClose, onReviewSubmitted, onTriggerOtpLogin }) {
+/**
+ * Review for ONE completed booking (server enforces: own booking, Completed, one review per booking).
+ * doctor = { id, name, bookingId, date }
+ */
+export default function ReviewModal({ doctor, isOpen, onClose, onReviewSubmitted, onTriggerOtpLogin }) {
+  const t = useT();
   const [rating, setRating] = useState(5);
   const [comment, setComment] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  useEffect(() => { if (isOpen) { setRating(5); setComment(''); setError(''); } }, [isOpen, doctor?.bookingId]);
 
   if (!isOpen || !doctor) return null;
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = async e => {
     e?.preventDefault();
-    if (!comment || !comment.trim()) {
-      setError('Please write your review feedback');
-      return;
-    }
-
-    if (!getSession('patient')) {
-      onTriggerOtpLogin();
-      return;
-    }
-
-    setError('');
-    setLoading(true);
-
+    if (!comment.trim()) { setError(t('review.writeSomething')); return; }
+    if (!getSession('patient')) { onTriggerOtpLogin?.(); return; }
+    setError(''); setLoading(true);
     try {
-      const data = await createClient('patient').post('/reviews', { doctorId: doctor.id, rating, comment: comment.trim() });
-
-      if (onReviewSubmitted) onReviewSubmitted(data.review, data.message);
+      const data = await createClient('patient').post('/reviews', { doctorId: doctor.id, bookingId: doctor.bookingId, rating, comment: comment.trim() });
+      onReviewSubmitted?.(data.review, data.moderated ? t('review.moderated') : t('review.published'));
       onClose();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
+    } catch (err) { setError(err.message); } finally { setLoading(false); }
   };
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '440px', padding: '24px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <div style={{ width: '38px', height: '38px', borderRadius: '12px', background: '#fef3c7', color: '#d97706', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Star size={20} fill="#d97706" />
-            </div>
+      <div className="modal-content fx-review-modal" role="dialog" aria-modal="true" aria-labelledby="review-title" onClick={e => e.stopPropagation()}>
+        <div className="fx-row fx-between" style={{ marginBottom: 14 }}>
+          <div className="fx-row">
+            <span className="fx-review-icon"><Star size={20} fill="#d97706" /></span>
             <div>
-              <h3 style={{ fontSize: '18px', fontWeight: '800' }}>Review {doctor.name}</h3>
-              <p style={{ fontSize: '12px', color: '#64748b' }}>Help other patients with verified feedback</p>
+              <h3 id="review-title">{t('review.title', { name: doctor.name })}</h3>
+              {doctor.date && <p className="adm-small adm-muted">{t('review.visitOn', { date: fmtDate(doctor.date) })}</p>}
             </div>
           </div>
-          <button onClick={onClose} style={{ background: '#f1f5f9', borderRadius: '50%', width: '32px', height: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <X size={18} color="#64748b" />
-          </button>
+          <button className="adm-icon-btn" onClick={onClose} aria-label={t('common.close')}><X size={18} /></button>
         </div>
-
-        {error && (
-          <div style={{ background: '#fef2f2', color: '#b91c1c', padding: '10px 14px', borderRadius: '12px', fontSize: '12px', marginBottom: '14px', border: '1px solid #fecaca' }}>
-            {error}
-          </div>
-        )}
-
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          {/* Star selector */}
-          <div style={{ textAlign: 'center', padding: '10px 0' }}>
-            <span style={{ fontSize: '12px', color: '#64748b', display: 'block', marginBottom: '8px', fontWeight: '600' }}>
-              Select Overall Rating:
-            </span>
-            <div style={{ display: 'flex', justifyContent: 'center', gap: '10px' }}>
+        {!doctor.bookingId ? (
+          <p className="fx-note fx-note-info">{t('doc.reviewPolicy')}</p>
+        ) : (
+          <form onSubmit={handleSubmit} className="adm-form">
+            {error && <div className="adm-alert adm-alert-error" role="alert">{error}</div>}
+            <div className="fx-stars" role="radiogroup" aria-label={t('review.rating')}>
               {[1, 2, 3, 4, 5].map(star => (
-                <button
-                  key={star}
-                  type="button"
-                  onClick={() => setRating(star)}
-                  style={{ background: 'transparent', padding: '4px' }}
-                >
-                  <Star
-                    size={32}
-                    color="#d97706"
-                    fill={star <= rating ? '#f59e0b' : 'none'}
-                    style={{ transition: 'transform 0.15s ease' }}
-                  />
+                <button key={star} type="button" role="radio" aria-checked={rating === star} aria-label={t('review.stars', { n: star })} onClick={() => setRating(star)}>
+                  <Star size={32} color="#d97706" fill={star <= rating ? '#f59e0b' : 'none'} />
                 </button>
               ))}
             </div>
-          </div>
-
-          <div>
-            <label style={{ fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '4px', display: 'block' }}>
-              Your Detailed Experience:
+            <label className="adm-field"><span>{t('review.experience')}</span>
+              <textarea rows={4} value={comment} maxLength={1000} onChange={e => setComment(e.target.value)} placeholder={t('review.placeholder')} required data-testid="review-text" />
             </label>
-            <textarea
-              rows={4}
-              value={comment}
-              onChange={e => setComment(e.target.value)}
-              placeholder="e.g. Dr. Ramesh diagnosed my allergic asthma immediately. Clear prescription, polite and punctual..."
-              required
-              style={{
-                width: '100%',
-                padding: '12px',
-                borderRadius: '14px',
-                border: '1px solid #cbd5e1',
-                fontSize: '13px',
-                lineHeight: '1.5'
-              }}
-            />
-          </div>
-
-          <p style={{ fontSize: '11px', color: '#64748b' }}>
-            🔒 If you booked this doctor through FindADoc, your review will automatically feature the <strong>Verified Booking Badge</strong>.
-          </p>
-
-          <button
-            type="submit"
-            disabled={loading}
-            className="btn-primary"
-            style={{ width: '100%', padding: '12px' }}
-          >
-            {loading ? 'Submitting...' : 'Post Verified Review'}
-          </button>
-        </form>
+            <p className="adm-small adm-muted"><BadgeCheck size={12} /> {t('review.verifiedNote')}</p>
+            <button type="submit" disabled={loading} className="btn-primary adm-btn" data-testid="review-submit">{loading ? t('common.saving') : t('review.submit')}</button>
+          </form>
+        )}
       </div>
     </div>
   );

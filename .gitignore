@@ -5,5 +5,7 @@ dist/
 !.env.example
 server/uploads/*
 !server/uploads/.gitkeep
+logs/
 *.log
+coverage/
 .DS_Store

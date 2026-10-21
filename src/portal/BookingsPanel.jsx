@@ -23,7 +23,7 @@ const SCOPES = [
  * Doctor / clinic bookings: today / upcoming / requests / past views, filters, pagination and actions
  * (accept, complete, no-show, cancel with reason). base = '/doctor-portal' | '/clinic-portal'.
  */
-export default function BookingsPanel({ client, base, locations = [], doctors = [], showDoctor = false, toolbar, refreshKey = 0, onChanged }) {
+export default function BookingsPanel({ client, base, locations = [], doctors = [], showDoctor = false, toolbar, refreshKey = 0, onChanged, extraActions }) {
   const toast = useToast();
   const [confirm, confirmEl] = useConfirm();
   const list = useAdminList(client, `${base}/bookings`, { scope: 'today', limit: 20 });
@@ -83,6 +83,7 @@ export default function BookingsPanel({ client, base, locations = [], doctors = 
           {b.status === 'Confirmed' && !future && <button className="adm-act adm-act-amber" disabled={busy} onClick={() => act(b, 'no-show').catch(() => {})}><UserX size={13} /> No-show</button>}
           {['Pending', 'Confirmed', 'AwaitingPayment'].includes(b.status) && <button className="adm-act adm-act-rose" disabled={busy} onClick={() => cancel(b)}><XCircle size={13} /> {b.status === 'Pending' ? 'Decline' : 'Cancel'}</button>}
           {b.directionsUrl && b.locationKind === 'home_visit' && <a className="adm-act" href={b.directionsUrl} target="_blank" rel="noopener noreferrer"><Navigation size={13} /> Map</a>}
+          {extraActions?.(b)}
         </div>
       );
     } }

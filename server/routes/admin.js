@@ -221,6 +221,8 @@ router.post('/doctors/:id/documents/:docId/:action(verify|reject)', wrap(async (
   if (!doc) return res.status(404).json({ error: 'Document not found' });
   doc.status = req.params.action === 'verify' ? 'verified' : 'rejected';
   d.markModified('documents');
+  // verifying the registration certificate also verifies the registration badge (when the details are filled in)
+  if (doc.docType === 'registration_certificate' && doc.status === 'verified' && d.registrationNumber && d.councilName) { d.registrationVerified = true; d.registrationVerifiedAt = new Date(); }
   await d.save();
   await notify({ type: 'doctor', id: d.id }, { type: 'account', title: `Document ${doc.status}`, body: `${doc.label || doc.docType} was ${doc.status} by FindADoc.${req.body?.reason ? ` ${String(req.body.reason).slice(0, 200)}` : ''}` });
   res.json({ success: true, message: `Document marked ${doc.status}` });

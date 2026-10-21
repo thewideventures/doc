@@ -1,7 +1,8 @@
 // Booking engine: availability, pricing per booking mode, slot locking, payment confirmation,
 // status changes and cancellation / refund (with ledger + notifications).
 import crypto from 'crypto';
-import { Booking, Doctor, Clinic, PaymentOrder, LedgerTransaction, ACTIVE_BOOKING_STATUSES } from '../models/index.js';
+import { Booking, Doctor, Clinic, PaymentOrder, LedgerTransaction, WaitlistEntry, ACTIVE_BOOKING_STATUSES } from '../models/index.js';
+import { emit } from './events.js';
 import { getSettings } from './settings.js';
 import { recordLedgerTransaction, round2 } from './gst.js';
 import { effectivePlan } from './plans.js';
@@ -51,18 +52,19 @@ const slotLockKey = (doctorId, date, time) => `${doctorId}|${date}|${time}`;
 export async function releaseExpiredHolds(extraFilter = {}) {
   const settings = await getSettings();
   const cutoff = new Date(Date.now() - (settings.paymentHoldMinutes || 10) * 60000);
-  const stale = await Booking.find({ status: 'AwaitingPayment', createdAt: { $lt: cutoff }, ...extraFilter }).select('id paymentOrderId').lean();
+  const stale = await Booking.find({ status: 'AwaitingPayment', createdAt: { $lt: cutoff }, ...extraFilter }).select('id paymentOrderId doctorId locationId date timeSlot').lean();
   if (!stale.length) return 0;
   await Booking.updateMany({ id: { $in: stale.map(b => b.id) } }, {
     $set: { status: 'Expired', paymentStatus: 'failed', cancelReason: 'Payment not completed in time', cancelledBy: 'system', cancelledAt: new Date() },
     $unset: { slotLock: 1 }, $push: { statusHistory: { status: 'Expired', at: new Date(), by: 'system', note: 'Payment window elapsed' } }
   });
   await PaymentOrder.updateMany({ id: { $in: stale.map(b => b.paymentOrderId).filter(Boolean) }, status: 'created' }, { status: 'expired' });
+  for (const b of stale) await emit('slot_freed', { doctorId: b.doctorId, locationId: b.locationId, date: b.date, time: b.timeSlot });
   return stale.length;
 }
 
 /** Slots for a doctor location on a date, with availability. */
-export async function availability(doctor, loc, date) {
+export async function availability(doctor, loc, date, { forUserId = '' } = {}) {
   if (!loc || loc.isActive === false) throw httpError(404, 'Consultation location not found');
   if (!isDateStr(date)) throw httpError(400, 'Date must be YYYY-MM-DD');
   const today = todayIST();
@@ -72,11 +74,15 @@ export async function availability(doctor, loc, date) {
   const times = slotsForDate(loc.schedule || {}, date);
   const taken = await Booking.find({ doctorId: doctor.id, date, slotLock: { $exists: true } }).select('timeSlot').lean();
   const takenSet = new Set(taken.map(t => t.timeSlot));
+  // Slots currently offered to someone on the waitlist are reserved for them until the offer expires
+  const offers = await WaitlistEntry.find({ doctorId: doctor.id, date, status: 'offered', offerExpiresAt: { $gt: new Date() } }).select('offeredTime userId').lean();
+  const heldSet = new Set(offers.filter(o => !forUserId || o.userId !== forUserId).map(o => o.offeredTime));
   const earliest = Date.now() + MIN_LEAD_MINUTES * 60000;
   const slots = times.map(t => {
     const past = istInstant(date, t).getTime() < earliest;
     const booked = takenSet.has(t);
-    return { time: t, available: !past && !booked, reason: booked ? 'booked' : past ? 'past' : '' };
+    const held = !booked && heldSet.has(t);
+    return { time: t, available: !past && !booked && !held, reason: booked ? 'booked' : held ? 'held' : past ? 'past' : '' };
   });
   return { date, slots, reason: times.length ? '' : 'Not available on this day' };
 }
@@ -110,7 +116,7 @@ const fmtSlot = b => `${b.date} ${b.timeSlot}`;
  * Create a booking. patient: { userId, name, phone, stateCode }.
  * source 'online' (patient app) or 'clinic' / 'doctor' (booked by staff; no online payment).
  */
-export async function createBooking({ doctor, locationId, date, time, patient, forMember = null, note = '', source = 'online' }) {
+export async function createBooking({ doctor, locationId, date, time, patient, forMember = null, note = '', source = 'online', followUpOf = '', waitlistEntryId = '' }) {
   if (!doctor || doctor.status === 'deleted') throw httpError(404, 'Doctor not found');
   if (doctor.status !== 'active') throw httpError(400, 'This doctor is not accepting bookings at the moment (profile not yet approved).', 'DOCTOR_NOT_ACTIVE');
   if (doctor.bookingEnabled === false) throw httpError(400, 'Booking is currently paused for this doctor', 'BOOKING_PAUSED');
@@ -121,10 +127,10 @@ export async function createBooking({ doctor, locationId, date, time, patient, f
     if (!clinic || clinic.status !== 'active') throw httpError(400, 'This clinic is not accepting bookings at the moment.', 'CLINIC_NOT_ACTIVE');
   }
   if (!isDateStr(date) || !isTimeStr(time)) throw httpError(400, 'Choose a valid date and time slot');
-  const av = await availability(doctor, loc, date);
+  const av = await availability(doctor, loc, date, { forUserId: patient.userId || '' });
   const slot = av.slots.find(s => s.time === time);
   if (!slot) throw httpError(400, 'That time is not offered at this location', 'BAD_SLOT');
-  if (!slot.available) throw httpError(409, slot.reason === 'booked' ? 'Sorry, this slot was just booked. Please pick another time.' : 'This slot is no longer available.', 'SLOT_TAKEN');
+  if (!slot.available) throw httpError(409, slot.reason === 'booked' || slot.reason === 'held' ? 'Sorry, this slot was just booked. Please pick another time.' : 'This slot is no longer available.', 'SLOT_TAKEN');
 
   const settings = await getSettings();
   const staffBooking = source !== 'online';
@@ -160,7 +166,9 @@ export async function createBooking({ doctor, locationId, date, time, patient, f
     status: initialStatus,
     confirmedAt: initialStatus === 'Confirmed' ? new Date() : null,
     statusHistory: [{ status: initialStatus, at: new Date(), by: source === 'online' ? 'patient' : source, note: '' }],
-    claimStatus: 'Pending'
+    claimStatus: 'Pending',
+    followUpOf: String(followUpOf || ''),
+    waitlistEntryId: String(waitlistEntryId || '')
   });
   try {
     await booking.save();
@@ -184,6 +192,7 @@ export async function createBooking({ doctor, locationId, date, time, patient, f
       await order.save();
     } catch (err) {
       await Booking.updateOne({ id: booking.id }, { $set: { status: 'Expired', paymentStatus: 'failed' }, $unset: { slotLock: 1 } });
+      await emit('slot_freed', { doctorId: booking.doctorId, locationId: booking.locationId, date: booking.date, time: booking.timeSlot });
       log.error('Payment order creation failed', { bookingId: booking.id, err: err.message });
       throw httpError(502, 'Could not start the payment right now. Please try again.', 'PAYMENT_INIT_FAILED');
     }
@@ -218,6 +227,7 @@ async function afterBookingConfirmedOrPending(b) {
       data: { bookingId: b.id }
     });
   }
+  await emit(pending ? 'booking_pending' : 'booking_confirmed', b);
 }
 
 /**
@@ -307,6 +317,8 @@ export async function failPaymentOrder(order, reason = 'Payment cancelled') {
       $set: { status: 'Expired', paymentStatus: 'failed', cancelledBy: 'system', cancelReason: reason, cancelledAt: new Date() },
       $unset: { slotLock: 1 }, $push: { statusHistory: { status: 'Expired', at: new Date(), by: 'system', note: reason } }
     });
+    const b = await Booking.findOne({ id: order.refId }).select('doctorId locationId date timeSlot').lean();
+    if (b) await emit('slot_freed', { doctorId: b.doctorId, locationId: b.locationId, date: b.date, time: b.timeSlot });
   }
 }
 
@@ -370,7 +382,52 @@ export async function cancelBooking(b, { by, reason = '' }) {
     body: `${b.bookingCode} • ${b.doctorName} • ${fmtSlot(b)} was cancelled by ${who}.${b.cancelReason ? ` Reason: ${b.cancelReason}.` : ''}${refundText}`,
     data: { bookingId: b.id }
   });
+  await emit('booking_closed', b);
+  if (!b.slotStart || b.slotStart.getTime() > Date.now()) await emit('slot_freed', { doctorId: b.doctorId, locationId: b.locationId, date: b.date, time: b.timeSlot });
   return { booking: b, refund };
+}
+
+/**
+ * Move a Pending / Confirmed booking to another free slot at the same location (payment carries over).
+ * Patients may reschedule up to the cancellation window before the appointment, at most 3 times.
+ */
+export async function rescheduleBooking(b, { date, time, by = 'patient' }) {
+  if (!['Pending', 'Confirmed'].includes(b.status)) throw httpError(400, `A ${b.status} booking cannot be rescheduled`);
+  const settings = await getSettings();
+  if (by === 'patient') {
+    const hoursLeft = b.slotStart ? (b.slotStart.getTime() - Date.now()) / 3600000 : 0;
+    if (hoursLeft < (settings.cancellationWindowHours ?? 4)) throw httpError(400, `Appointments can be rescheduled up to ${settings.cancellationWindowHours ?? 4} hours before the visit. Please contact the clinic.`, 'TOO_LATE');
+    if ((b.rescheduleCount || 0) >= 3) throw httpError(400, 'This booking has already been rescheduled the maximum number of times', 'RESCHEDULE_LIMIT');
+  }
+  if (b.date === date && b.timeSlot === time) throw httpError(400, 'Choose a different time');
+  const doctor = await Doctor.findOne({ id: b.doctorId });
+  const loc = doctor ? findLocation(doctor, b.locationId) : null;
+  if (!loc || loc.isActive === false) throw httpError(400, 'This consultation location is no longer available', 'BAD_LOCATION');
+  if (!isDateStr(date) || !isTimeStr(time)) throw httpError(400, 'Choose a valid date and time slot');
+  const av = await availability(doctor, loc, date, { forUserId: b.patientUserId });
+  const slot = av.slots.find(s => s.time === time);
+  if (!slot || !slot.available) throw httpError(409, 'That slot is not available. Please pick another time.', 'SLOT_TAKEN');
+  const old = { date: b.date, time: b.timeSlot };
+  try {
+    const r = await Booking.updateOne({ id: b.id, status: b.status, date: old.date, timeSlot: old.time }, {
+      $set: { date, timeSlot: time, slotStart: istInstant(date, time), slotLock: slotLockKey(b.doctorId, date, time), rescheduledFrom: `${old.date} ${old.time}`, queueToken: null, queueStatus: 'waiting', queuePriority: null },
+      $inc: { rescheduleCount: 1, linkVersion: 1 },
+      $push: { statusHistory: { status: b.status, at: new Date(), by, note: `Rescheduled from ${old.date} ${old.time} to ${date} ${time}` } }
+    });
+    if (r.modifiedCount !== 1) throw httpError(409, 'The booking changed in the meantime. Please refresh and try again.', 'CONFLICT');
+  } catch (e) {
+    if (e?.code === 11000) throw httpError(409, 'Sorry, this slot was just booked. Please pick another time.', 'SLOT_TAKEN');
+    throw e;
+  }
+  const fresh = await Booking.findOne({ id: b.id });
+  await notify(participants(fresh).filter(p => p.type !== by), {
+    type: 'booking_status', title: 'Booking rescheduled',
+    body: `${fresh.bookingCode} • ${fresh.doctorName} moved from ${old.date} ${old.time} to ${date} ${time}.`,
+    data: { bookingId: fresh.id }
+  });
+  await emit('booking_rescheduled', fresh);
+  await emit('slot_freed', { doctorId: fresh.doctorId, locationId: fresh.locationId, date: old.date, time: old.time });
+  return fresh;
 }
 
 /** Doctor / clinic actions: accept | complete | no-show */
@@ -391,7 +448,9 @@ export async function updateBookingStatus(b, action, by) {
   } else throw httpError(400, 'Unknown action');
   if (b.status !== 'Confirmed') b.slotLock = b.status === 'Completed' || b.status === 'NoShow' ? b.slotLock : undefined;
   b.statusHistory.push({ status: b.status, at: new Date(), by, note: '' });
+  if (b.status === 'Completed' && b.queueStatus !== 'done') { b.queueStatus = 'done'; b.consultEndedAt = b.consultEndedAt || new Date(); }
   await b.save();
+  await emit(b.status === 'Confirmed' ? 'booking_confirmed' : 'booking_closed', b);
   if (b.patientUserId) {
     const t = { Confirmed: 'Booking confirmed', Completed: 'Visit completed', NoShow: 'Marked as no-show' }[b.status];
     await notify({ type: 'patient', id: b.patientUserId }, {
@@ -410,6 +469,7 @@ export function bookingView(b) {
   const c = o.locationPoint?.coordinates;
   o.directionsUrl = Array.isArray(c) && c.length === 2 ? `https://www.google.com/maps/dir/?api=1&destination=${c[1]},${c[0]}` : '';
   o.modeLabel = MODE_LABEL[o.bookingMode] || '';
+  delete o.linkVersion;
   return o;
 }
 

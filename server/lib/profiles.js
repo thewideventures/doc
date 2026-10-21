@@ -65,6 +65,8 @@ export function publicDoctor(doc, ep, extra = {}) {
     isPremium: ep ? ep.tier > 0 : Boolean(doc.isPremium),
     plan: ep ? { code: ep.code, name: ep.plan.name, verifiedBadge: Boolean(ep.limits.verifiedBadge), featured: Boolean(ep.limits.featuredInAi) } : null,
     registrationNumber: doc.registrationNumber || '', councilName: doc.councilName || '',
+    registrationVerified: Boolean(doc.registrationVerified), insurers: doc.insurers || [],
+    videoConsult: locs.some(l => l.kind === 'online'),
     specialities: doc.specialities || [], languages: doc.languages || [], bio: doc.bio || '',
     bookingEnabled: doc.bookingEnabled !== false && locs.length > 0,
     consultationFee: fees.length ? Math.min(...fees) : doc.consultationFee,
@@ -116,6 +118,7 @@ export function publicClinic(c, ep, extra = {}) {
     lat: ll?.lat ?? c.latitude ?? null, lng: ll?.lng ?? c.longitude ?? null,
     directionsUrl: directionsUrl(c.location), timings: c.timings || [], is24x7: Boolean(c.is24x7),
     facilities: c.facilities || [], doctorIds: c.doctorIds || [], isVerified: c.status === 'active',
+    insurers: c.insurers || [], emergencyServices: Boolean(c.emergencyServices),
     isPremium: ep ? ep.tier > 0 : Boolean(c.isPremium),
     plan: ep ? { code: ep.code, name: ep.plan.name, verifiedBadge: Boolean(ep.limits.verifiedBadge) } : null,
     ...extra

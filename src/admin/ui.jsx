@@ -62,7 +62,7 @@ export function Modal({ open, title, onClose, children, width = 560, footer }) {
       <div className="modal-content adm-modal" style={{ maxWidth: width }} onClick={e => e.stopPropagation()} role="dialog" aria-modal="true">
         <div className="adm-modal-head">
           <h3>{title}</h3>
-          <button className="adm-icon-btn" onClick={onClose} aria-label="Close"><X size={18} /></button>
+          {onClose && <button className="adm-icon-btn" onClick={onClose} aria-label="Close"><X size={18} /></button>}
         </div>
         <div className="adm-modal-body">{children}</div>
         {footer && <div className="adm-modal-foot">{footer}</div>}

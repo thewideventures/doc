@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { Stethoscope, ArrowLeft, Loader2 } from 'lucide-react';
 import { ToastProvider } from '../admin/ui';
 import { apiFetch, getSession } from '../lib/api';
 import { DoctorProfileView } from '../components/DoctorDetailModal';
+import { useT, LanguageSwitcher } from '../i18n';
 import BookingModal from '../components/BookingModal';
 import PatientAuthModal from '../components/PatientAuthModal';
-import ReviewModal from '../components/ReviewModal';
 
 function setMeta(name, content, attr = 'name') {
   let el = document.head.querySelector(`meta[${attr}="${name}"]`);
@@ -21,7 +21,8 @@ export default function DoctorProfilePage() {
   const [error, setError] = useState('');
   const [booking, setBooking] = useState(null);
   const [auth, setAuth] = useState(false);
-  const [review, setReview] = useState(null);
+  const navigate = useNavigate();
+  const t = useT();
 
   useEffect(() => {
     setData(null); setError('');
@@ -59,21 +60,20 @@ export default function DoctorProfilePage() {
       <div className="fx-public-page">
         <header className="fx-public-head">
           <Link to="/" className="fx-row"><span className="fx-logo fx-logo-sm"><Stethoscope size={18} /></span><span className="fx-logo-text">FindA<span>Doc</span></span></Link>
-          <Link to="/" className="adm-link"><ArrowLeft size={13} /> All doctors</Link>
+          <div className="fx-row"><LanguageSwitcher compact /><Link to="/" className="adm-link"><ArrowLeft size={13} /> {t('doc.allDoctors')}</Link></div>
         </header>
         <main className="fx-public-main">
           {error && <div className="adm-alert adm-alert-error">{error}</div>}
           {!data && !error && <div className="fx-center"><Loader2 className="adm-spin" /></div>}
           {data && (
             <div className="adm-card">
-              <DoctorProfileView doctor={data.doctor} reviews={data.reviews} onBook={(d, locationId) => setBooking({ doctor: d, locationId })} onReview={d => (getSession('patient') ? setReview(d) : setAuth(true))} />
-              {data.doctor.bookingEnabled && <button className="btn-primary adm-btn fx-mt fx-grow" style={{ width: '100%' }} onClick={() => setBooking({ doctor: data.doctor })}>Book appointment</button>}
+              <DoctorProfileView doctor={data.doctor} reviews={data.reviews} onBook={(d, locationId) => setBooking({ doctor: d, locationId })} onReview={() => (getSession('patient') ? navigate('/bookings?tab=past') : setAuth(true))} />
+              {data.doctor.bookingEnabled && <button className="btn-primary adm-btn fx-mt fx-grow" style={{ width: '100%' }} onClick={() => setBooking({ doctor: data.doctor })}>{t('doc.bookAppointment')}</button>}
             </div>
           )}
         </main>
         <BookingModal doctor={booking?.doctor} initialLocationId={booking?.locationId} isOpen={Boolean(booking)} onClose={() => setBooking(null)} onRequireLogin={() => setAuth(true)} onSessionExpired={() => setAuth(true)} />
         <PatientAuthModal isOpen={auth} onClose={() => setAuth(false)} onSuccess={() => setAuth(false)} />
-        <ReviewModal doctor={review} isOpen={Boolean(review)} onClose={() => setReview(null)} onTriggerOtpLogin={() => setAuth(true)} />
       </div>
     </ToastProvider>
   );

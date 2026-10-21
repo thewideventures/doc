@@ -103,6 +103,44 @@ This covers how FindADoc is protected, what is still open, and the checklist to 
 - `npm audit` was clean at release.
 - Run `npm audit --omit=dev` in CI and before each deploy; keep the `razorpay`, `express`, `mongoose` and `sharp` minor versions current.
 
+## Phase 4 controls
+- **The same model applies to every new route:**
+  - `requireUser(role)` sessions; ownership checks on bookings, prescriptions, records, shares, queue, waitlist and lab orders (another user's id returns 404, never the data)
+  - zod validation of params, query and body
+  - per-user and per-IP rate limits
+  - the response scrubber (no `passwordHash`, tokens, partner-key hashes, private doctor notes or commission fields to patients)
+  - The origin guard and CSRF rules are unchanged.
+- **Health data is private by default:**
+  - Lab reports and record uploads go through the phase-3 pipeline (magic-byte check, size limits, image re-encode, PDF checks) into `private/` storage.
+  - They are streamed only by authorised routes (`sendPrivateFile`) to the owner, the admin, or a doctor holding an active share.
+  - They are never under the public `/api/files` static path; tests assert no static leak.
+- **Consent first (DPDP):**
+  - Uploads, doctor sharing and WhatsApp/SMS reminders each need the matching purpose consent.
+  - Consents are timestamped records (purpose, version, method, IP truncated to /24).
+  - Withdrawal stops the purpose immediately; withdrawing health-data consent revokes every record share.
+  - Sharing is per booking, can be revoked and is logged.
+- **Signed booking links:**
+  - Links are HMAC-SHA256 over the booking id, version and expiry using `BOOKING_LINK_SECRET` (default derived from `USER_JWT_SECRET`), compared in constant time.
+  - Any change to the booking bumps the version, so old links go stale.
+  - Links can only view, reschedule or cancel that one booking, and expose no phone numbers or other personal data.
+  - They are rate-limited (40 per 10 minutes per IP).
+- **Lab partner API:**
+  - Keys use the `labk_` prefix and are random. The admin sees them once; only a SHA-256 hash is stored.
+  - The key is sent in the `X-Lab-Key` header. The partner is scoped to its own lab's orders, rate-limited, and can be revoked by an admin.
+- **Messaging:**
+  - Provider adapters (Meta, Gupshup, MSG91) are env-gated. Phone numbers are masked in logs, and message bodies with medical detail are not logged.
+  - Templates only carry booking time, doctor, place and the signed link.
+  - The console provider is refused in production.
+- **ABHA:**
+  - Optional and off by default. The mock is refused in production; the sandbox needs ABDM credentials.
+  - Link attempts are short-lived `AbhaTxn` rows (10-minute expiry, rate-limited). OTPs are never stored; the sandbox adapter encrypts them for ABDM.
+  - The linked ABHA number is returned only to its owner, and it can be unlinked at any time.
+- **Account deletion:**
+  - There is a grace period (default 30 days). After it, the scheduled sweep anonymises the profile, family, records and consents and revokes all sessions.
+  - GST invoices and ledger rows are kept as the law requires (amounts and invoice numbers), with the patient name and phone removed.
+- **PDFs** are generated server-side with pdfkit from typed fields (no HTML rendering, so no template injection). They are sent `no-store` with `Content-Disposition: attachment`.
+- **CSP:** no new third-party browser hosts. WhatsApp, SMS and ABDM calls are server-side only, and the emergency directions are plain `https://www.google.com/maps` links.
+
 ## Deployment checklist
 1. **Secrets:**
    - set `NODE_ENV=production`
@@ -138,6 +176,16 @@ This covers how FindADoc is protected, what is still open, and the checklist to 
     - `curl -I https://<domain>/` shows CSP and HSTS
     - `npm audit --omit=dev` is clean
 
+11. **Phase 4 reminders and links:**
+    - `APP_BASE_URL=https://<domain>` and a separate `BOOKING_LINK_SECRET` (`openssl rand -hex 32`)
+    - `WHATSAPP_PROVIDER` with its keys and Meta/Gupshup/MSG91-approved templates in `WHATSAPP_TEMPLATES`, and/or `REMINDER_SMS=true` with a DLT template
+    - run the scheduler on exactly one instance (`SCHEDULER_ENABLED=false` elsewhere)
+12. **DPDP:**
+    - set `GRIEVANCE_OFFICER_NAME`, `GRIEVANCE_OFFICER_EMAIL`, `GRIEVANCE_OFFICER_PHONE` and `GRIEVANCE_OFFICER_ADDRESS`
+    - have counsel review the privacy policy and terms text in `src/i18n/legal.js`
+    - check the deletion sweep in the logs
+13. **ABHA:** keep `ABHA_PROVIDER` unset or disabled until ABDM onboarding is complete. The sandbox adapter is for integration testing only.
+
 ## Future work
 - **RazorpayX payouts.** Automate doctor and clinic settlements through the Payouts API: contacts and fund accounts, idempotency keys, `payout.processed` / `payout.reversed` webhooks, maker-checker approval. Today payouts are manual and recorded with the bank UTR.
 - **Shared Redis rate-limit and replay stores** for multi-instance deployments.
@@ -145,3 +193,6 @@ This covers how FindADoc is protected, what is still open, and the checklist to 
 - **Malware scanning** of uploaded PDFs (ClamAV or a cloud scanner), and moving documents to S3 with KMS.
 - **Zod coverage** for the remaining portal profile routes. These are currently covered by the global sanitiser plus per-field typing in the handlers.
 - **Razorpay Route** for split settlements, if pass-through fees should never touch the platform account.
+- **Server-sent events** for the live queue instead of polling, behind the same auth.
+- **Unicode PDF fonts** (Noto Sans Malayalam/Devanagari) and translated admin screens.
+- **Encrypting health-record files at rest** (per-object keys via KMS) when moving to S3.

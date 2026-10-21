@@ -172,3 +172,33 @@ export async function runSecurityMigrations() {
   else await PaymentOrder.createIndexes().catch(e => out.push(`index sync: ${e.message}`));
   return out;
 }
+
+/**
+ * Phase 4 (idempotent, additive, safe on real data — never deletes or rewrites existing values):
+ * 1) registrationVerified backfill from already-verified registration certificates
+ * 2) queueStatus default on today's / future bookings (older documents pre-date the field)
+ * 3) indexes for the new collections + the one-review-per-booking unique index
+ */
+export async function runPhase4Migrations() {
+  const m = await import('../models/index.js');
+  const { todayIST, addDays } = await import('./time.js');
+  const out = [];
+  await once('phase4-registration-verified-backfill', async () => {
+    const r = await m.Doctor.updateMany(
+      { registrationVerified: { $ne: true }, registrationNumber: { $type: 'string', $gt: '' }, documents: { $elemMatch: { docType: 'registration_certificate', status: 'verified' } } },
+      { $set: { registrationVerified: true, registrationVerifiedAt: new Date() } }
+    );
+    if (r.modifiedCount) out.push(`registration badge set for ${r.modifiedCount} doctor(s) with a verified certificate`);
+  });
+  await once('phase4-queue-status-default', async () => {
+    const r = await m.Booking.collection.updateMany({ queueStatus: { $exists: false }, date: { $gte: addDays(todayIST(), -1) } }, { $set: { queueStatus: 'waiting' } });
+    if (r.modifiedCount) out.push(`queueStatus initialised on ${r.modifiedCount} upcoming booking(s)`);
+  });
+  const dupReviews = await m.Review.aggregate([{ $match: { bookingId: { $type: 'string', $gt: '' } } }, { $group: { _id: '$bookingId', n: { $sum: 1 } } }, { $match: { n: { $gt: 1 } } }, { $limit: 3 }]);
+  if (dupReviews.length) out.push('WARNING: some bookings have more than one review — the one-review-per-booking index was not built');
+  else await m.Review.createIndexes().catch(e => out.push(`review index: ${e.message}`));
+  for (const name of ['QueueDay', 'ScheduledMessage', 'WaitlistEntry', 'Prescription', 'HealthRecord', 'RecordShare', 'Lab', 'LabTest', 'LabOrder', 'Consent', 'AbhaTxn']) {
+    await m[name].createIndexes().catch(e => out.push(`${name} index: ${e.message}`));
+  }
+  return out;
+}

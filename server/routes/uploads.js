@@ -7,6 +7,7 @@ import { rateLimit, userKey } from '../lib/rateLimit.js';
 import { getStorage } from '../lib/storage/index.js';
 import { notify } from '../lib/notify.js';
 import { processUpload } from '../lib/fileSafety.js';
+import { sniffType } from '../lib/uploadPipeline.js';
 import log from '../lib/logger.js';
 
 const router = express.Router();
@@ -20,21 +21,14 @@ const upload = multer({
   limits: { fileSize: Math.max(MAX_IMAGE, MAX_DOC), files: 1, fields: 10, fieldSize: 1024, parts: 12 }
 });
 
-// Detect the real file type from magic bytes (never trust the client's mimetype / extension).
-function sniff(buf) {
-  if (!buf || buf.length < 12) return null;
-  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return { mime: 'image/jpeg', ext: 'jpg', kind: 'image' };
-  if (buf.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return { mime: 'image/png', ext: 'png', kind: 'image' };
-  if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return { mime: 'image/webp', ext: 'webp', kind: 'image' };
-  if (buf.slice(0, 5).toString('ascii') === '%PDF-') return { mime: 'application/pdf', ext: 'pdf', kind: 'pdf' };
-  return null;
-}
+const sniff = sniffType;
 
 const PURPOSES = {
   doctor_photo: { roles: ['doctor', 'clinic'], accept: ['image'], folder: 'doctors' },
   clinic_logo: { roles: ['clinic'], accept: ['image'], folder: 'clinics' },
   clinic_gallery: { roles: ['clinic'], accept: ['image'], folder: 'clinics/gallery' },
   patient_photo: { roles: ['patient'], accept: ['image'], folder: 'patients' },
+  member_photo: { roles: ['patient'], accept: ['image'], folder: 'patients/members' },
   doctor_document: { roles: ['doctor'], accept: ['image', 'pdf'], folder: 'doctor-docs', private: true }
 };
 

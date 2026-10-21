@@ -21,7 +21,7 @@ import {
 } from './data.js';
 import { rescanReviews } from './lib/reviews.js';
 import { getSettings } from './lib/settings.js';
-import { runPlatformMigrations, runSecurityMigrations } from './lib/migrations.js';
+import { runPlatformMigrations, runSecurityMigrations, runPhase4Migrations } from './lib/migrations.js';
 import { config } from './lib/config.js';
 import log from './lib/logger.js';
 
@@ -49,6 +49,7 @@ export async function connectDB() {
     await runAdminMigrations();
     try { await runPlatformMigrations(); } catch (err) { console.error('Platform migration error:', err.message); }
     try { for (const m of await runSecurityMigrations()) log.info(`Migration: ${m}`); } catch (err) { log.error('Security migration error', { err: err.message }); }
+    try { for (const m of await runPhase4Migrations()) log.info(`Migration: ${m}`); } catch (err) { log.error('Phase-4 migration error', { err: err.message }); }
   } catch (error) {
     console.error('MongoDB connection error:', error.message);
     if (config.isProd) { log.error('Cannot start without MongoDB in production'); process.exit(1); }

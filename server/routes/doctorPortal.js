@@ -49,6 +49,9 @@ router.put('/profile', wrap(async (req, res) => {
     d.registrationNumber = r;
   }
   if (b.councilName !== undefined) d.councilName = str(b.councilName, 120);
+  // Any change to the registration details needs a fresh admin verification for the badge
+  if (d.isModified('registrationNumber') || d.isModified('councilName')) { d.registrationVerified = false; d.registrationVerifiedAt = null; }
+  if (b.insurers !== undefined) d.insurers = strList(b.insurers, 40, 80);
   if (b.registrationYear !== undefined) {
     const y = b.registrationYear === '' || b.registrationYear === null ? null : parseInt(b.registrationYear, 10);
     if (y !== null && !(y >= 1950 && y <= new Date().getFullYear())) throw bad('Registration year looks invalid');
@@ -196,7 +199,8 @@ export async function bookingAnalytics(match) {
     byStatus: Object.fromEntries(byStatus.map(x => [x._id, x.n])),
     byMonth: byMonth.map(x => ({ month: x._id, bookings: x.bookings, online: Math.round((x.online - x.refunds) * 100) / 100 })),
     byLocation: byLocation.map(x => ({ name: x._id || '—', n: x.n })),
-    byMode: Object.fromEntries(byMode.map(x => [x._id, x.n]))
+    byMode: Object.fromEntries(byMode.map(x => [x._id, x.n])),
+    noShowRate: (() => { const c = byStatus.find(x => x._id === 'Completed')?.n || 0, n = byStatus.find(x => x._id === 'NoShow')?.n || 0; return c + n ? Math.round((n / (c + n)) * 1000) / 10 : 0; })()
   };
 }
 

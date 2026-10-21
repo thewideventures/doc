@@ -21,6 +21,14 @@ import { paymentsRouter, subscriptionsRouter, razorpayWebhook } from './routes/p
 import meRouter from './routes/me.js';
 import doctorPortalRouter from './routes/doctorPortal.js';
 import clinicPortalRouter from './routes/clinicPortal.js';
+import patientHealthRouter from './routes/patientHealth.js';
+import doctorClinicalRouter from './routes/doctorClinical.js';
+import clinicExtrasRouter from './routes/clinicExtras.js';
+import adminPhase4Router from './routes/adminPhase4.js';
+import bookingLinksRouter from './routes/bookingLinks.js';
+import { publicLabsRouter, labOrdersRouter, labPartnerRouter } from './routes/labs.js';
+import './lib/reminders.js'; // registers booking -> reminder listeners
+import './lib/waitlist.js';  // registers slot-freed -> waitlist offer listener
 import { UPLOAD_ROOT, PUBLIC_URL_PREFIX } from './lib/storage/index.js';
 import { wrap } from './routes/common.js';
 
@@ -65,6 +73,7 @@ export function createApp() {
 
   app.use('/api/admin', auditMutations);
   app.use('/api/specialities', auditMutations);
+  app.use('/api/admin', adminPhase4Router);
   app.use('/api/admin', adminRouter);
   app.use(legacyAdminRouter); // classic console endpoints under /api/admin/* and POST /api/specialities
 
@@ -76,8 +85,15 @@ export function createApp() {
   app.use('/api/payments', limits.payments(), paymentsRouter);
   app.use('/api/subscriptions', limits.payments(), subscriptionsRouter);
   app.use('/api/me', meRouter);
+  app.use('/api/me', patientHealthRouter);
   app.use('/api/doctor-portal', doctorPortalRouter);
+  app.use('/api/doctor-portal', doctorClinicalRouter);
   app.use('/api/clinic-portal', clinicPortalRouter);
+  app.use('/api/clinic-portal', clinicExtrasRouter);
+  app.use('/api/booking-links', bookingLinksRouter);
+  app.use('/api/lab-orders', limits.payments(), labOrdersRouter);
+  app.use('/api/lab-partner', labPartnerRouter);
+  app.use('/api', publicLabsRouter);
   app.use('/api', publicRouter);
 
   app.get('/api/health', (req, res) => res.json({ ok: true }));

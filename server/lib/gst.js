@@ -122,6 +122,7 @@ export async function recordLedgerTransaction(opts, settings) {
     description: opts.description || '',
     plan: opts.plan || '',
     bookingId: opts.bookingId || '',
+    labOrderId: opts.labOrderId || '',
     doctorId: opts.doctorId || '',
     sacCode: sac,
     ...gst,

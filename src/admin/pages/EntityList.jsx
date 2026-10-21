@@ -137,6 +137,10 @@ export function EntityDetailModal({ api, entity, id, onClose, onChanged }) {
               <Field label="Clinics">{it.clinics?.map(c => c.clinicName).join(', ')}</Field>
               <Field label="Consultation fee">{inr(it.consultationFee)}</Field>
               <Field label="Rating">{it.rating} ★ ({it.reviewCount} reviews)</Field>
+              <Field label="Registration">{it.registrationNumber ? `${it.councilName || '—'} • ${it.registrationNumber}` : 'Not provided'}{' '}
+                {it.registrationVerified ? <span className="badge-verified"><ShieldCheck size={11} /> Verified</span> : null}
+                {it.registrationNumber && <button className="adm-act" style={{ marginLeft: 6 }} data-testid="reg-verify-toggle" onClick={() => api.post(`/doctors/${it.id}/registration`, { verified: !it.registrationVerified }).then(() => { load(); onChanged?.(); }).catch(e => setErr(e.message))}>{it.registrationVerified ? 'Remove badge' : 'Mark verified'}</button>}
+              </Field>
               <Field label="Bookings">{rel.bookingCount}</Field>
             </>}
             {entity === 'clinics' && <>

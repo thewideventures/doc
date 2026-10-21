@@ -37,7 +37,16 @@ const cases = [
   ['mock payments', { PAYMENTS_MODE: 'mock' }, /PAYMENTS_MODE/],
   ['missing CORS_ORIGINS', { CORS_ORIGINS: '' }, /CORS_ORIGINS/],
   ['wildcard CORS', { CORS_ORIGINS: '*' }, /CORS/],
-  ['no admin password', { ADMIN_PASSWORD_HASH: '' }, /ADMIN_PASSWORD/]
+  ['no admin password', { ADMIN_PASSWORD_HASH: '' }, /ADMIN_PASSWORD/],
+  // phase 4: dev-only adapters and incomplete provider configs are refused in production
+  ['console WhatsApp', { WHATSAPP_PROVIDER: 'console' }, /WHATSAPP_PROVIDER/],
+  ['unknown WhatsApp provider', { WHATSAPP_PROVIDER: 'twilio' }, /WHATSAPP_PROVIDER/],
+  ['Meta WhatsApp without token', { WHATSAPP_PROVIDER: 'meta' }, /META_WA_TOKEN/],
+  ['bad WHATSAPP_TEMPLATES', { WHATSAPP_PROVIDER: 'meta', META_WA_TOKEN: 't'.repeat(40), META_WA_PHONE_NUMBER_ID: '1234', WHATSAPP_TEMPLATES: '[not json' }, /WHATSAPP_TEMPLATES/],
+  ['mock ABHA', { ABHA_PROVIDER: 'mock' }, /ABHA_PROVIDER/],
+  ['ABHA sandbox without ABDM credentials', { ABHA_PROVIDER: 'sandbox' }, /ABDM_CLIENT_ID/],
+  ['SMS reminders without DLT template', { REMINDER_SMS: 'true' }, /MSG91_REMINDER_TEMPLATE_ID/],
+  ['weak BOOKING_LINK_SECRET', { BOOKING_LINK_SECRET: 'changeme' }, /BOOKING_LINK_SECRET/]
 ];
 for (const [name, patch, re] of cases) {
   test(`production refuses to start: ${name}`, () => {

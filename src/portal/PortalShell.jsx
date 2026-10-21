@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Menu, X, LogOut, ArrowLeft, Stethoscope, Building2 } from 'lucide-react';
 import NotificationBell from '../components/NotificationBell';
+import { LanguageSwitcher } from '../i18n';
 
 /**
  * Shared doctor / clinic workspace shell (sidebar on desktop, drawer + bottom tabs on mobile).
@@ -46,6 +47,7 @@ export default function PortalShell({ role, entity, nav, active, onNav, onLogout
         <header className="adm-topbar">
           <button className="adm-icon-btn adm-only-mobile" onClick={() => setOpen(true)} aria-label="Open menu"><Menu size={20} /></button>
           <div className="adm-crumbs"><strong>{current?.label || ''}</strong></div>
+          <LanguageSwitcher compact />
           {client && <NotificationBell client={client} onNavigate={onNotification} />}
         </header>
         <main className="adm-content fx-portal-content">{children}</main>

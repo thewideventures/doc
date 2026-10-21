@@ -38,6 +38,17 @@ export function createAdminApi(_session, onUnauthorized) {
     post: (path, body = {}) => request('POST', path, body),
     put: (path, body = {}) => request('PUT', path, body),
     del: (path, body) => request('DELETE', path, body),
+    /** Multipart upload (e.g. lab report). */
+    async upload(path, file, fields = {}) {
+      const f = new FormData();
+      Object.entries(fields).forEach(([k, v]) => v !== undefined && v !== '' && f.append(k, v));
+      f.append('file', file, file.name || 'upload');
+      const res = await authedFetch(`/api/admin${path}`, { method: 'POST', body: f });
+      if (res.status === 401) throw expired();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Upload failed (${res.status})`);
+      return data;
+    },
     /** Fetch a protected file (e.g. verification document) and open it in a new tab. */
     async openFile(path) {
       const res = await authedFetch(`/api/admin${path}`);

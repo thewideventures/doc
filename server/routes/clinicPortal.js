@@ -52,6 +52,8 @@ router.put('/profile', wrap(async (req, res) => {
   if (b.website !== undefined) { const w = str(b.website, 200); if (w && !/^https?:\/\/[^\s]+\.[^\s]+$/.test(w)) throw bad('Website must start with http:// or https://'); c.website = w; }
   if (b.email !== undefined) { const e = str(b.email, 120); if (e && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) throw bad('Email address looks invalid'); c.email = e; }
   if (b.facilities !== undefined) c.facilities = strList(b.facilities, 30, 60);
+  if (b.insurers !== undefined) c.insurers = strList(b.insurers, 40, 80);
+  if (b.emergencyServices !== undefined) c.emergencyServices = Boolean(b.emergencyServices);
   for (const field of ['photo', 'coverPhoto']) {
     if (b[field] !== undefined) {
       const p = str(b[field], 400);

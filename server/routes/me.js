@@ -1,7 +1,7 @@
 // Patient self-service: profile, family members, bookings.
 import express from 'express';
 import crypto from 'crypto';
-import { Booking } from '../models/index.js';
+import { Booking, Review, Prescription } from '../models/index.js';
 import { requireUser } from '../lib/userAuth.js';
 import { normalizeAddress, toPoint } from '../lib/geo.js';
 import { selfUser } from '../lib/profiles.js';
@@ -30,7 +30,7 @@ const profileSchema = z.object({
   photo: zStr(400).optional(), address: addressSchema.optional(),
   lat: z.union([z.number(), z.string().max(30), z.null()]).optional(), lng: z.union([z.number(), z.string().max(30), z.null()]).optional()
 });
-const memberSchema = z.object({ name: zStr(80), relation: zStr(20).optional(), gender: zStr(30).optional(), dob: zStr(10).optional() });
+const memberSchema = z.object({ name: zStr(80), relation: zStr(20).optional(), gender: zStr(30).optional(), dob: zStr(10).optional(), photo: zStr(400).optional() });
 const idParams = z.object({ id: zId });
 
 function validDob(dob) {
@@ -84,7 +84,11 @@ router.put('/family/:id', validate({ params: idParams, body: memberSchema }), wr
   const u = req.auth.user;
   const idx = (u.familyMembers || []).findIndex(m => m.id === req.params.id);
   if (idx < 0) throw httpError(404, 'Family member not found');
-  u.familyMembers[idx] = { ...memberFrom(req.body), id: req.params.id };
+  const prev = u.familyMembers[idx];
+  const next = { ...memberFrom(req.body), id: req.params.id };
+  if (req.body.photo === undefined) next.photo = prev.photo || '';
+  else await removeIfReplaced(prev.photo, next.photo);
+  u.familyMembers[idx] = next;
   u.markModified('familyMembers');
   await u.save();
   res.json({ success: true, user: selfUser(u) });
@@ -92,6 +96,8 @@ router.put('/family/:id', validate({ params: idParams, body: memberSchema }), wr
 
 router.delete('/family/:id', validate({ params: idParams }), wrap(async (req, res) => {
   const u = req.auth.user;
+  const gone = (u.familyMembers || []).find(m => m.id === req.params.id);
+  if (gone?.photo) await removeIfReplaced(gone.photo, '');
   u.familyMembers = (u.familyMembers || []).filter(m => m.id !== req.params.id);
   await u.save();
   res.json({ success: true, user: selfUser(u) });
@@ -102,7 +108,9 @@ function memberFrom(b = {}) {
   if (name.length < 2) throw bad('Family member name is required');
   const relation = RELATIONS.includes(b.relation) ? b.relation : 'other';
   const gender = GENDERS.includes(b.gender) ? b.gender : '';
-  return { name, relation, gender, dob: validDob(str(b.dob, 10)) };
+  const photo = str(b.photo, 400);
+  if (photo && !keyFromPublicUrl(photo)) throw bad('Photo must be uploaded');
+  return { name, relation, gender, dob: validDob(str(b.dob, 10)), photo };
 }
 
 // Bookings (history)
@@ -116,7 +124,17 @@ router.get('/bookings', wrap(async (req, res) => {
     Booking.find(filter).sort(sort).skip(paging.skip).limit(paging.limit).lean(),
     Booking.countDocuments(filter)
   ]);
-  res.json({ items: items.map(bookingView), total, page: paging.page, limit: paging.limit, pages: Math.max(1, Math.ceil(total / paging.limit)) });
+  const ids = items.map(b => b.id);
+  const [reviewed, rxs] = await Promise.all([
+    Review.find({ bookingId: { $in: ids } }).select('bookingId').lean(),
+    Prescription.find({ bookingId: { $in: ids }, patientUserId: req.auth.uid }).select('id bookingId followUp').lean()
+  ]);
+  const rev = new Set(reviewed.map(r => r.bookingId));
+  const rxBy = Object.fromEntries(rxs.map(p => [p.bookingId, p]));
+  res.json({
+    items: items.map(b => ({ ...bookingView(b), reviewed: rev.has(b.id), prescriptionId: rxBy[b.id]?.id || '', followUpSuggested: Boolean(rxBy[b.id]?.followUp?.afterDays || rxBy[b.id]?.followUp?.date) })),
+    total, page: paging.page, limit: paging.limit, pages: Math.max(1, Math.ceil(total / paging.limit))
+  });
 }));
 
 router.post('/bookings/:id/cancel', wrap(async (req, res) => {

@@ -18,7 +18,7 @@ export function refundedSoFar(order) {
 export const refundableAmount = order => (['paid', 'partially_refunded'].includes(order.status) ? Math.max(0, round2(order.amount - refundedSoFar(order))) : 0);
 
 function parts(order) {
-  if (order.purpose !== 'booking') return { platform: round2(order.amount), pass: 0 };
+  if (order.purpose !== 'booking' && order.purpose !== 'lab_order') return { platform: round2(order.amount), pass: 0 };
   const platform = round2(order.meta?.platformFee ?? 0);
   const pass = round2(order.meta?.passThrough ?? Math.max(0, order.amount - platform));
   return { platform, pass };
@@ -84,9 +84,11 @@ export async function refundPaymentOrder(order, { amount, split, reason = 'Refun
   const settings = await getSettings();
   const orig = order.ledgerInvoiceNumber ? await LedgerTransaction.findOne({ invoiceNumber: order.ledgerInvoiceNumber }) : null;
   const isBooking = order.purpose === 'booking';
+  const isLab = order.purpose === 'lab_order';
   const b = isBooking ? booking || await Booking.findOne({ id: order.refId }) : null;
   const txn = await recordLedgerTransaction({
-    type: 'refund', category: isBooking ? 'booking_refund' : 'subscription_refund', series: platformPart > 0 ? 'credit' : 'refund',
+    type: 'refund', category: isBooking ? 'booking_refund' : isLab ? 'lab_refund' : 'subscription_refund', series: platformPart > 0 ? 'credit' : 'refund',
+    labOrderId: isLab ? order.refId : '',
     partyType: order.partyType, partyId: orig?.partyId || order.partyId, partyName: orig?.partyName || b?.patientName || order.meta?.partyName || '',
     partyPhone: orig?.partyPhone || b?.patientPhone || '', partyGstin: orig?.partyGstin || '', partyStateCode: orig?.partyStateCode || '',
     amount: -platformPart, passThroughAmount: -passPart, plan: orig?.plan || '',
@@ -95,7 +97,7 @@ export async function refundPaymentOrder(order, { amount, split, reason = 'Refun
     originalInvoiceNumber: order.ledgerInvoiceNumber || '', paymentReference: r.providerRefundId || '',
     razorpayOrderId: order.provider === 'razorpay' ? order.providerOrderId : '', razorpayPaymentId: order.provider === 'razorpay' ? order.providerPaymentId : '',
     razorpayRefundId: order.provider === 'razorpay' ? r.providerRefundId || '' : '',
-    description: `${isBooking ? `Refund for booking ${b?.bookingCode || order.refId}` : `Refund for ${order.meta?.planName || 'subscription'}`} — ${reason}`.slice(0, 300)
+    description: `${isBooking ? `Refund for booking ${b?.bookingCode || order.refId}` : isLab ? `Refund for lab order ${order.meta?.orderCode || order.refId}` : `Refund for ${order.meta?.planName || 'subscription'}`} — ${reason}`.slice(0, 300)
   }, settings);
   if (orig) {
     orig.refundedAmount = round2((orig.refundedAmount || 0) + refundAmt);
